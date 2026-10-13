@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Монітор пацієнта</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Монітор пацієнта</h1>
+    <span id="conn" class="conn off">не підключено</span>
+  </header>
+
+  <main>
+    <section class="tiles">
+      <div class="tile" id="tile-hr">
+        <div class="label">Пульс</div>
+        <div class="value"><span id="hr">--</span><small>уд/хв</small></div>
+      </div>
+      <div class="tile" id="tile-spo2">
+        <div class="label">SpO₂</div>
+        <div class="value"><span id="spo2">--</span><small>%</small></div>
+      </div>
+      <div class="tile" id="tile-temp">
+        <div class="label">Температура</div>
+        <div class="value"><span id="temp">--</span><small>°C</small></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>ЕКГ</h2>
+      <canvas id="ecg"></canvas>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

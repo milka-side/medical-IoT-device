@@ -1,0 +1,17 @@
+{
+  "name": "medical-iot-web",
+  "version": "0.1.0",
+  "description": "Веб-панель для носимого пристрою: ЕКГ, пульс, SpO2, температура в реальному часі",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "mock": "node ../tools/mock-sender.js",
+    "mock:line": "node ../tools/mock-sender.js --mode line"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

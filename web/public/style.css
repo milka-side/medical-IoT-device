@@ -1,0 +1,31 @@
+:root {
+  --bg: #0b0f14;
+  --panel: #131a22;
+  --border: #233040;
+  --text: #e6edf3;
+  --muted: #8b98a8;
+  --hr: #3ddc84;
+  --spo2: #4fc3f7;
+  --temp: #ffb74d;
+  --warn: #ff5252;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid var(--border); }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.conn { font-size: 13px; padding: 3px 10px; border-radius: 999px; }
+.conn.on { background: #0f3d22; color: var(--hr); }
+.conn.off { background: #3d1414; color: var(--warn); }
+main { padding: 16px 20px; display: grid; gap: 16px; max-width: 1200px; margin: 0 auto; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.tile, .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; }
+.label { color: var(--muted); font-size: 13px; }
+.value { font-size: 44px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.value small { font-size: 15px; font-weight: 400; color: var(--muted); margin-left: 6px; }
+#tile-hr span { color: var(--hr); }
+#tile-spo2 span { color: var(--spo2); }
+#tile-temp span { color: var(--temp); }
+.tile.alarm { border-color: var(--warn); }
+.tile.alarm span { color: var(--warn) !important; }
+canvas { display: block; width: 100%; height: 280px; }
