@@ -37,25 +37,25 @@
 
 ## Швидкий старт
 
-Потрібен Node.js 18+.
+Потрібен Node.js 18+
 
 ```bash
 cd web
 npm install
-npm start          # панель: http://localhost:3000
+npm start          # візуалізаці: http://localhost:3000
 ```
 
-Демо без заліза (у другому терміналі, з `web`):
+Демо без мікроконтроллера (у другому терміналі, з `web`):
 
 ```bash
-npm run mock       # віртуальний пристрій із тестовими даними
+npm run mock       # симуляція підключеного пристрою
 ```
 
-Пристрій через USB (з кореня проєкту, замість Serial Monitor):
+Пристрій через USB:
 
 ```bash
 pip install pyserial
-python tools/serial-bridge.py --port /dev/ttyACM0     # Windows: --port COM5
+python tools/serial-bridge.py --port /dev/ttyACM0
 ```
 
 ## Формат даних
@@ -114,7 +114,7 @@ medical-iot-device/
 └── docs/                  зображення для README
 ```
 
-## Дорожня карта
+## План проєкту
 
 - [x] Веб-панель реального часу
 - [x] Прийом даних через HTTP і Serial
@@ -123,5 +123,3 @@ medical-iot-device/
 - [ ] Аналіз аритмій і HRV, виявлення гіпоксії
 - [ ] Хмара (Azure IoT Hub)
 - [ ] Корпус (Fusion) і друкована плата (KiCad)
-
-> Прототип для демонстрації. Пороги тривог умовні й не є медичними рекомендаціями.
