@@ -61,7 +61,7 @@ Medical IoT Device - це компактний носимий IoT-пристрі
 
 ### Команда
 - [Святослав Волянюк](https://github.com/Sviat-Vol)
-- [Аліна Дерев'ягіна](https://github.com/Alina-Derevyagina)
+- [Аліна Дерев'ягіна](https://github.com/alinlinss)
 - [Євгеній Щербина](https://github.com/SherbynaEugene)
 - [Мілана Катрич](https://github.com/milka-side)
 
