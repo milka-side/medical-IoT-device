@@ -1,14 +1,18 @@
-const ECG_SECONDS = 5;            // ширина вікна ЕКГ, с
-const ALARMS = {                  // межі підсвітки (демо, не медичні)
+const ECG_SECONDS = 5;
+const ALARMS = {
   hr: (v) => v < 50 || v > 120,
   spo2: (v) => v < 92,
   temp: (v) => v < 35 || v > 37.8,
 };
 
+const STALE_MS = 5000;
+
 const $ = (id) => document.getElementById(id);
 const canvas = $('ecg');
 let fs = 250;
 let ecg = [];
+let lastDataAt = 0;
+let wsOpen = false;
 
 function showVitals(d) {
   for (const [key, digits] of [['hr', 0], ['spo2', 0], ['temp', 1]]) {
@@ -47,27 +51,52 @@ function drawEcg() {
   ctx.stroke();
 }
 
+const conn = $('conn');
+
+function noteData(receivedAt) {
+  if (receivedAt && receivedAt > lastDataAt) lastDataAt = receivedAt;
+}
+
+function updateConnBadge() {
+  if (!wsOpen) {
+    conn.textContent = 'не підключено';
+    conn.className = 'conn off';
+    return;
+  }
+  if (lastDataAt && Date.now() - lastDataAt > STALE_MS) {
+    const sec = Math.round((Date.now() - lastDataAt) / 1000);
+    conn.textContent = `немає даних (${sec}с)`;
+    conn.className = 'conn warn';
+    return;
+  }
+  conn.textContent = 'підключено';
+  conn.className = 'conn on';
+}
+
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
-  const conn = $('conn');
-  ws.onopen = () => { conn.textContent = 'підключено'; conn.className = 'conn on'; };
+  ws.onopen = () => { wsOpen = true; updateConnBadge(); };
   ws.onclose = () => {
-    conn.textContent = 'не підключено';
-    conn.className = 'conn off';
+    wsOpen = false;
+    updateConnBadge();
     setTimeout(connect, 2000);
   };
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
-    if (m.type === 'snapshot') Object.values(m.devices).forEach(showVitals);
+    if (m.type === 'snapshot') {
+      Object.values(m.devices).forEach((d) => { showVitals(d); noteData(d.received_at); });
+    }
     if (m.type === 'data') {
       showVitals(m.data);
+      noteData(m.data.received_at);
       if (m.data.ecg) addEcg(m.data.ecg, m.data.fs);
     }
   };
 }
 
 connect();
+setInterval(updateConnBadge, 1000);
 (function loop() {
   drawEcg();
   requestAnimationFrame(loop);

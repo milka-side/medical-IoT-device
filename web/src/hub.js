@@ -20,6 +20,9 @@ function ingest(raw, source) {
   }
   const msg = { ...res.msg, source };
   stats.received++;
+  if (res.warnings && res.warnings.length) {
+    console.warn(`[hub] ${msg.device_id}: ${res.warnings.join('; ')}`);
+  }
 
   const prev = latest.get(msg.device_id) || {};
   const { ecg, fs, ...vitals } = msg;

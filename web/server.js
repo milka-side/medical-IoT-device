@@ -6,6 +6,7 @@ const { WebSocketServer } = require('ws');
 const hub = require('./src/hub');
 const { parseLine } = require('./src/parser');
 const { startMqttIngest } = require('./src/mqtt-ingest');
+const { startAzureIngest } = require('./src/azure-ingest');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -47,7 +48,9 @@ function readBody(req) {
 function serveStatic(req, res) {
   const urlPath = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   const file = path.normalize(path.join(PUBLIC_DIR, urlPath === '/' ? 'index.html' : urlPath));
-  if (!file.startsWith(PUBLIC_DIR)) return sendJson(res, 403, { error: 'forbidden' });
+  if (file !== PUBLIC_DIR && !file.startsWith(PUBLIC_DIR + path.sep)) {
+    return sendJson(res, 403, { error: 'forbidden' });
+  }
   fs.readFile(file, (err, buf) => {
     if (err) return sendJson(res, 404, { error: 'not found' });
     res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
@@ -58,7 +61,10 @@ function serveStatic(req, res) {
 function summarize(results) {
   const accepted = results.filter((r) => r.ok).length;
   const errors = results.filter((r) => !r.ok).map((r) => r.error);
-  return { accepted, rejected: errors.length, errors: errors.slice(0, 10) };
+  const warnings = results.filter((r) => r.ok).flatMap((r) => r.warnings || []);
+  const out = { accepted, rejected: errors.length, errors: errors.slice(0, 10) };
+  if (warnings.length) out.warnings = warnings.slice(0, 10);
+  return out;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -109,6 +115,7 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 wss.on('connection', (ws) => hub.addClient(ws));
 
 startMqttIngest(hub);
+startAzureIngest(hub);
 
 server.listen(PORT, HOST, () => {
   console.log(`Панель: http://localhost:${PORT}`);

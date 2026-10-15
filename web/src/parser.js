@@ -1,6 +1,5 @@
 const DEFAULT_FS = 250;
 
-// Значення поза діапазоном це помилка датчика
 const RANGES = {
   hr: [20, 300],
   spo2: [50, 100],
@@ -60,7 +59,7 @@ function normalize(input, receivedAt = Date.now()) {
     const why = dropped.length ? dropped.join(', ') : 'немає жодного поля з даними (ecg, hr, spo2, temp)';
     return { ok: false, error: why };
   }
-  return { ok: true, msg };
+  return { ok: true, msg, warnings: dropped };
 }
 
 function parseLine(line) {
