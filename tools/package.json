@@ -1,0 +1,8 @@
+{
+  "name": "medical-iot-tools",
+  "private": true,
+  "description": "Допоміжні скрипти-симулятори пристрою",
+  "dependencies": {
+    "mqtt": "^5.16.1"
+  }
+}

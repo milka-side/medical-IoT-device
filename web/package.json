@@ -6,12 +6,14 @@
   "scripts": {
     "start": "node server.js",
     "mock": "node ../tools/mock-sender.js",
-    "mock:line": "node ../tools/mock-sender.js --mode line"
+    "mock:line": "node ../tools/mock-sender.js --mode line",
+    "mock:mqtt": "node ../tools/mqtt-mock-sender.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "mqtt": "^5.16.1"
   }
 }

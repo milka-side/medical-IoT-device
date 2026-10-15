@@ -11,14 +11,13 @@ const MODE = args.mode || 'json';
 const DEVICE = args.id || 'mock-01';
 const API_KEY = process.env.API_KEY || '';
 
-const FS = 250;          // Гц
+const FS = 250;
 const BATCH = 50;
-const BATCH_MS = 200;    // мс між пакетами
+const BATCH_MS = 200;
 const VITALS_EVERY = 5;
 
 const VITALS = { hr: 72, spo2: 98, temp: 36.6, battery: 87 };
 
-// Один серцевий цикл (72 уд/хв при 250 Гц), шлеться по колу
 const ECG_BEAT = [
   2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048,
   2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2049, 2049, 2050, 2051, 2053, 2056, 2060,
