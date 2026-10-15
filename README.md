@@ -2,7 +2,7 @@
 <p align="center"><i>Проєкт з курсу «Принципи організації комп’ютера»</i></p>
 <div align="center">
   <a href="https://github.com/Sviat-Vol">Святослав Волянюк</a>,
-  <a href="https://github.com/Alina-Derevyagina">Аліна Дерев'ягіна</a>,
+  <a href="https://github.com/alinlinss">Аліна Дерев'ягіна</a>,
   <a href="https://github.com/SherbynaEugene">Євгеній Щербина</a>,
   <a href="https://github.com/milka-side">Мілана Катрич</a>
 
