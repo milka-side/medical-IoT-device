@@ -11,6 +11,11 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
+# Console on the built-in USB-Serial-JTAG only. The default primary console
+# is UART0, whose TX on ESP32-C6 is GPIO16 - the same pin as ADS1293 DRDYB
+# (D6), so log output and the chip's data-ready output fought over one wire.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
 # Board (ESP32-C6FH4) has 4MB flash - confirmed via `esptool flash_id`.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
@@ -20,3 +25,4 @@ CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 CONFIG_MIOT_WIFI_SSID="UCU_Guest"
 CONFIG_MIOT_WIFI_PASSWORD=""
 CONFIG_MIOT_SERVER_URL="http://10.10.241.72:3000/api/data"
+CONFIG_MIOT_COMMAND_URL="http://10.10.241.72:3000/api/command"
