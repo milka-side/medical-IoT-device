@@ -18,6 +18,14 @@
 #define PIN_I2C_SDA        22  // D4
 #define PIN_I2C_SCL        23  // D5
 
+// XIAO ESP32-C6 on-board RF switch (Seeed wiki): GPIO3 powers the switch
+// (active low), GPIO14 selects the antenna (low = built-in ceramic, high =
+// external U.FL). The Arduino core sets these in its board variant; plain
+// ESP-IDF leaves them floating, so the switch may never route the radio to
+// the antenna at all.
+#define PIN_RF_SWITCH_EN   3
+#define PIN_RF_ANT_SELECT  14
+
 #define SPI_HOST_ID        SPI2_HOST
 #define I2C_PORT_NUM        0
 #define I2C_CLOCK_HZ        400000

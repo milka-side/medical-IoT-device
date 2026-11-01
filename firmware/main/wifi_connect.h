@@ -10,3 +10,7 @@
 esp_err_t wifi_connect_start(void);
 
 bool wifi_connect_is_up(void);
+
+// true = modem-sleep (radio dozes between beacons), false = radio always
+// awake. No-op if Wi-Fi was never started.
+void wifi_connect_set_power_save(bool enable);
