@@ -121,13 +121,22 @@ esp_err_t max30102_init(i2c_master_bus_handle_t bus)
     reg_write(REG_OVF_COUNTER, 0x00);
     reg_write(REG_FIFO_RD_PTR, 0x00);
 
-    reg_write(REG_FIFO_CONFIG, 0x5F);  // sample avg=4, rollover enabled
-    reg_write(REG_MODE_CONFIG, 0x03);  // SpO2 mode (RED + IR)
+    // SMP_AVE must stay 1: the chip *decimates* by the averaging factor, so
+    // avg=4 at 100 sps put only 25 samples/s into the FIFO while everything
+    // below assumes SAMPLE_RATE_HZ=100. Beat intervals came out 4x too short
+    // in samples, the 27-sample refractory then rejected every other beat,
+    // and HR read ~2x too high (72 bpm showed as ~144). LED pulse rate is
+    // set by SPO2_SR, not averaging, so this costs no extra LED current.
+    reg_write(REG_FIFO_CONFIG, 0x1F);  // sample avg=1, rollover enabled, A_FULL=15
     reg_write(REG_SPO2_CONFIG, 0x27);  // ADC range 4096nA, 100 sps, pulse width 411us (18-bit)
     reg_write(REG_LED1_PA, 0x24);      // RED ~7mA
     reg_write(REG_LED2_PA, 0x24);      // IR ~7mA
     reg_write(REG_INTR_ENABLE_1, 0x00);
     reg_write(REG_INTR_ENABLE_2, 0x00);
+    // SPO2_CONFIG/LED_PA persist across shutdown - leave the sensor off
+    // (<1 uA) until max30102_start() wakes it; no reason to spend LED
+    // current before a measurement window actually opens.
+    reg_write(REG_MODE_CONFIG, 0x80);  // SHDN
 
     s_ring_head = 0;
     s_ring_count = 0;
@@ -137,8 +146,31 @@ esp_err_t max30102_init(i2c_master_bus_handle_t bus)
     s_last_beat_sample = -1;
     s_hr_ema_init = false;
 
-    ESP_LOGI(TAG, "MAX30102 initialised");
+    ESP_LOGI(TAG, "MAX30102 initialised (shut down)");
     return ESP_OK;
+}
+
+esp_err_t max30102_start(void)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_ring_head = 0;
+    s_ring_count = 0;
+    s_ir_baseline_init = false;
+    s_prev_ac_valid = false;
+    s_sample_counter = 0;
+    s_last_beat_sample = -1;
+    s_hr_ema_init = false;
+    xSemaphoreGive(s_lock);
+
+    reg_write(REG_FIFO_WR_PTR, 0x00);
+    reg_write(REG_OVF_COUNTER, 0x00);
+    reg_write(REG_FIFO_RD_PTR, 0x00);
+    return reg_write(REG_MODE_CONFIG, 0x03); // wake, SpO2 mode (RED + IR)
+}
+
+esp_err_t max30102_stop(void)
+{
+    return reg_write(REG_MODE_CONFIG, 0x80); // SHDN, <1 uA
 }
 
 // Must be called with s_lock held.

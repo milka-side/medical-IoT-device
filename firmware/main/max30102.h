@@ -4,7 +4,17 @@
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 
+// One-time I2C/reset/FIFO setup. Leaves the sensor in shutdown (<1 uA) -
+// call max30102_start() to actually turn the LEDs/ADC on.
 esp_err_t max30102_init(i2c_master_bus_handle_t bus);
+
+// Wakes the sensor into SpO2 mode (LEDs+ADC on) / puts it back into the
+// documented MAX3010x full-shutdown mode (MODE_CONFIG SHDN bit, <1 uA).
+// start() also clears the ring buffer and beat-detector state, same reason
+// as ads1293_start_conversion(): a fresh window shouldn't resume with a
+// stale baseline from before the LEDs were off.
+esp_err_t max30102_start(void);
+esp_err_t max30102_stop(void);
 
 // Drains the sensor's FIFO into an internal ring buffer. Call this often
 // (e.g. every 20-50 ms) from the sampling loop.
