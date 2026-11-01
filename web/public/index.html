@@ -13,24 +13,38 @@
   </header>
 
   <main>
+    <div id="banner" class="banner" hidden></div>
+
+    <section class="controls">
+      <button id="btn-ecg" class="measure-btn" data-type="ecg">Виміряти ЕКГ</button>
+      <button id="btn-vitals" class="measure-btn" data-type="vitals">Виміряти пульс/SpO₂</button>
+      <button id="btn-temp" class="measure-btn" data-type="temp">Виміряти температуру</button>
+      <button id="btn-all" class="measure-btn all" data-type="all">Виміряти все</button>
+    </section>
+
     <section class="tiles">
       <div class="tile" id="tile-hr">
         <div class="label">Пульс</div>
         <div class="value"><span id="hr">--</span><small>уд/хв</small></div>
+        <div class="measured-at" id="hr-age"></div>
       </div>
       <div class="tile" id="tile-spo2">
         <div class="label">SpO₂</div>
         <div class="value"><span id="spo2">--</span><small>%</small></div>
+        <div class="measured-at" id="spo2-age"></div>
       </div>
       <div class="tile" id="tile-temp">
         <div class="label">Температура</div>
         <div class="value"><span id="temp">--</span><small>°C</small></div>
+        <div class="measured-at" id="temp-age"></div>
       </div>
     </section>
 
     <section class="panel">
       <h2>ЕКГ</h2>
+      <div id="ecg-lod" class="lod-warn" hidden></div>
       <canvas id="ecg"></canvas>
+      <div class="measured-at" id="ecg-age"></div>
     </section>
   </main>
 
