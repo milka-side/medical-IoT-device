@@ -23,6 +23,14 @@ menu "Medical IoT Device"
         string "device_id reported to the server"
         default "esp32c6-01"
 
+    config MIOT_COMMAND_URL
+        string "Server URL for command polling (GET /api/command)"
+        default "http://192.168.1.100:3000/api/command"
+        help
+            Same host/port as Server URL above, just the /api/command
+            endpoint. Polled once a second while idle so a dashboard button
+            press is picked up within ~1s without keeping a connection open.
+
     config MIOT_MQTT_ENABLE
         bool "Also publish telemetry over MQTT"
         default n

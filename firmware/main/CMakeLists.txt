@@ -4,6 +4,7 @@ idf_component_register(
         "wifi_connect.c"
         "telemetry_http.c"
         "telemetry_mqtt.c"
+        "command_poll.c"
         "ads1293.c"
         "tmp117.c"
         "max30102.c"
