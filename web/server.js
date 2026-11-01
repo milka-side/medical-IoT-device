@@ -7,6 +7,7 @@ const hub = require('./src/hub');
 const { parseLine } = require('./src/parser');
 const { startMqttIngest } = require('./src/mqtt-ingest');
 const { startAzureIngest } = require('./src/azure-ingest');
+const commands = require('./src/commands');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -23,8 +24,15 @@ const MIME = {
 };
 
 function sendJson(res, status, obj) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify(obj));
+  const body = JSON.stringify(obj);
+  // Explicit Content-Length instead of Node's default chunked encoding -
+  // simpler for the ESP32's HTTP client to consume.
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Access-Control-Allow-Origin': '*',
+  });
+  res.end(body);
 }
 
 function readBody(req) {
@@ -53,7 +61,14 @@ function serveStatic(req, res) {
   }
   fs.readFile(file, (err, buf) => {
     if (err) return sendJson(res, 404, { error: 'not found' });
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+    // No cache headers were being sent at all, which leaves it up to each
+    // browser's own heuristics whether to reuse an old copy of app.js -
+    // explicit no-cache forces a revalidation every load instead, so a
+    // server-side change always shows up on the next refresh.
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+      'Cache-Control': 'no-cache',
+    });
     res.end(buf);
   });
 }
@@ -68,7 +83,8 @@ function summarize(results) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const { pathname } = new URL(req.url, 'http://x');
+  const reqUrl = new URL(req.url, 'http://x');
+  const { pathname } = reqUrl;
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -102,6 +118,28 @@ const server = http.createServer(async (req, res) => {
       const out = summarize(results);
       return sendJson(res, out.accepted ? 200 : 400, out);
     }
+
+    if (pathname === '/api/command') {
+      // Дашборд ставить команду тут; пристрій забирає її через GET нижче.
+      let parsed;
+      try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: 'некоректний JSON' }); }
+      const deviceId = String(parsed.device_id ?? '').slice(0, 64);
+      if (!deviceId) return sendJson(res, 400, { error: 'відсутній device_id' });
+      const result = commands.setCommand(deviceId, parsed.type);
+      return sendJson(res, result.ok ? 200 : 400, result);
+    }
+  }
+
+  if (req.method === 'GET' && pathname === '/api/command') {
+    // Пристрій опитує це раз на секунду, поки простоює; одне звернення
+    // одразу забирає команду (one-shot), як і POST /api/data захищено
+    // X-API-Key, коли він заданий на сервері.
+    if (API_KEY && req.headers['x-api-key'] !== API_KEY) {
+      return sendJson(res, 401, { error: 'невірний або відсутній X-API-Key' });
+    }
+    const deviceId = (reqUrl.searchParams.get('device_id') || '').slice(0, 64);
+    if (!deviceId) return sendJson(res, 400, { error: 'відсутній device_id' });
+    return sendJson(res, 200, { type: commands.takeCommand(deviceId) });
   }
 
   if (req.method === 'GET' && pathname === '/api/latest') return sendJson(res, 200, hub.getLatest());

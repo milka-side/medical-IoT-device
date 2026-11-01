@@ -26,7 +26,16 @@ function ingest(raw, source) {
 
   const prev = latest.get(msg.device_id) || {};
   const { ecg, fs, ...vitals } = msg;
-  latest.set(msg.device_id, { ...prev, ...vitals });
+  const merged = { ...prev, ...vitals };
+  // These only mean something while actively counting down - if this
+  // message doesn't carry one, that measurement has ended, so the stored
+  // snapshot must drop it too. Otherwise a browser that (re)connects after
+  // the window closed would see a stale "3s remaining" and the dashboard
+  // would show that button as still active forever.
+  for (const key of ['lockout_remaining_s', 'ecg_remaining_s', 'vitals_remaining_s', 'temp_remaining_s', 'lod', 'adc_sps']) {
+    if (!(key in vitals)) delete merged[key];
+  }
+  latest.set(msg.device_id, merged);
 
   broadcast({ type: 'data', data: msg });
   return res;

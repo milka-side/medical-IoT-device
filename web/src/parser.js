@@ -55,8 +55,18 @@ function normalize(input, receivedAt = Date.now()) {
     }
   }
 
-  if (msg.hr === undefined && msg.spo2 === undefined && msg.temp === undefined && !msg.ecg) {
-    const why = dropped.length ? dropped.join(', ') : 'немає жодного поля з даними (ecg, hr, spo2, temp)';
+  // Статус простою/блокування/вимірювання - окремий, самодостатній тип
+  // повідомлення (heartbeat без ecg/hr/spo2/temp), а не "сміття".
+  if (typeof input.status === 'string' && input.status) {
+    msg.status = input.status.slice(0, 32);
+  }
+  for (const key of ['lockout_remaining_s', 'ecg_remaining_s', 'vitals_remaining_s', 'temp_remaining_s', 'lod', 'adc_sps']) {
+    const v = num(input[key]);
+    if (v !== undefined) msg[key] = v;
+  }
+
+  if (msg.hr === undefined && msg.spo2 === undefined && msg.temp === undefined && !msg.ecg && !msg.status) {
+    const why = dropped.length ? dropped.join(', ') : 'немає жодного поля з даними (ecg, hr, spo2, temp, status)';
     return { ok: false, error: why };
   }
   return { ok: true, msg, warnings: dropped };
