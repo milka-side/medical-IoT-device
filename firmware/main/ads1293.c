@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "pins.h"
 
@@ -37,6 +38,7 @@ static const char *TAG = "ads1293";
 #define REG_AFE_SHDN_CN     0x14
 #define REG_AFE_FAULT_CN    0x15
 #define REG_AFE_PACE_CN     0x17
+#define REG_ERROR_LOD       0x18
 #define REG_DIGO_STRENGTH   0x1F
 #define REG_R2_RATE         0x21
 #define REG_R3_RATE_CH1     0x22
@@ -55,6 +57,7 @@ static const char *TAG = "ads1293";
 #define REG_REVID           0x40
 
 #define CONFIG_START_CON    0x01
+#define CONFIG_STANDBY      0x02
 
 #define READ_BIT            0x80
 
@@ -198,10 +201,12 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio)
 
     s_drdy_sem = xSemaphoreCreateBinary();
 
+    // DRDYB is a push-pull output, no pull needed - and ProtoCentral's
+    // README explicitly says to remove any pull-up/down on DRDY.
     gpio_config_t io_conf = {
         .pin_bit_mask = 1ULL << PIN_ADS1293_DRDY,
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
         .intr_type = GPIO_INTR_NEGEDGE,
     };
     gpio_config(&io_conf);
@@ -215,28 +220,46 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio)
     reg_read(REG_REVID, &revid);
     ESP_LOGI(TAG, "REVID = 0x%02X (expect non-zero, non-0xFF if SPI wiring is OK)", revid);
 
-    // Register sequence below is copied verbatim from ProtoCentral's own
-    // ads1293Begin3LeadECG() for this exact breakout board (protocentral-
-    // ads1293-arduino, v1.0.0, protocentral_ads1293.cpp) rather than
-    // hand-assembled - it's the one combination actually verified to work
-    // on this hardware. Registers not listed here are left at chip reset
-    // defaults, same as that example.
+    // Based on ProtoCentral's 3-lead sequence, but trimmed to what this
+    // device actually wires up: a single 3-electrode cable (RA, LA, RL) and
+    // only channel 1 (Lead I) is ever read. ProtoCentral's version also
+    // routes IN3 (LL) into channel 2 and into the common-mode detector -
+    // with no LL electrode that input floats, the common-mode estimate
+    // picks up whatever it floats to, and the RLD amp then drives that
+    // garbage back into the body as noise on Lead I.
     reg_write(REG_FLEX_CH1_CN, 0x11);   // IN2(LA)-IN1(RA) -> channel 1 (Lead I)
-    reg_write(REG_FLEX_CH2_CN, 0x19);   // IN3(LL)-IN1(RA) -> channel 2 (Lead II)
-    reg_write(REG_CMDET_EN, 0x07);
-    reg_write(REG_RLD_CN, 0x04);
+    reg_write(REG_CMDET_EN, 0x03);      // common-mode from IN1+IN2 only (RA, LA)
+    reg_write(REG_RLD_CN, 0x04);        // RLD amp output -> IN4 (RL electrode)
+
+    // DC lead-off detection on RA/LA (same LOD_CN/LOD_CURRENT ProtoCentral's
+    // v2 library enables by default) - ERROR_LOD then reports which of the
+    // two sensing electrodes has no skin contact.
+    reg_write(REG_LOD_CN, 0x00);
+    reg_write(REG_LOD_EN, 0x03);
+    reg_write(REG_LOD_CURRENT, 0x04);
+
+    // Verified against ProtoCentral's own ads1293-arduino v2.0 startClock():
+    // force OSC_CN to 0 first, give the crystal 20ms to settle, only then
+    // raise STRTCLK (0x04) - this board had been working without the
+    // settle delay, but skipping it risks an unreliable clock lock on a
+    // cold boot or a marginal crystal.
+    reg_write(REG_OSC_CN, 0x00);
+    vTaskDelay(pdMS_TO_TICKS(20));
     reg_write(REG_OSC_CN, 0x04);
-    reg_write(REG_AFE_SHDN_CN, 0x24);
-    reg_write(REG_R2_RATE, 0x02);
-    reg_write(REG_R3_RATE_CH1, 0x02);
-    reg_write(REG_R3_RATE_CH2, 0x02);
+
+    // Bits c / c+3 shut down channel (c+1)'s INA / sigma-delta - channels 2
+    // and 3 are both unused, so both are powered off (ProtoCentral's
+    // 3-lead default only shut down channel 3: 0x24).
+    reg_write(REG_AFE_SHDN_CN, 0x36);
+    reg_write(REG_AFE_PACE_CN, 0x01);   // PACE_SHDN - pace channel unused here, shut its AFE down
+    reg_write(REG_R2_RATE, 0x02);       // R2 = 5 (one-hot encoding, see datasheet)
+    reg_write(REG_R3_RATE_CH1, 0x02);   // R3 = 6 -> 102400/(4*5*6) = 853.3 sps
     reg_write(REG_DRDYB_SRC, 0x08);     // DRDYB pulses on channel 1 ECG ready
-    reg_write(REG_CH_CNFG, 0x30);       // enable ECG read-back on channels 1 and 2
+    reg_write(REG_CH_CNFG, 0x10);       // ECG read-back on channel 1 only
 
-    // Leave config mode: start conversions.
-    reg_write(REG_CONFIG, CONFIG_START_CON);
-
-    ESP_LOGI(TAG, "ADS1293 initialised");
+    // Park in standby until a measurement window opens.
+    reg_write(REG_CONFIG, CONFIG_STANDBY);
+    ESP_LOGI(TAG, "ADS1293 initialised (standby)");
     return ESP_OK;
 }
 
@@ -278,6 +301,34 @@ static double s_baseline;
 static bool s_baseline_init = false;
 static double s_notch_x1, s_notch_x2, s_notch_y1, s_notch_y2;
 static double s_lowpass;
+
+esp_err_t ads1293_start_conversion(void)
+{
+    // Drain any stale DRDY signal left over from before conversions were
+    // stopped, so the first xSemaphoreTake in ads1293_read_sample() blocks
+    // for a genuinely new sample instead of returning immediately.
+    xSemaphoreTake(s_drdy_sem, 0);
+    s_baseline_init = false; // force a clean filter-state reset on the next sample
+    return reg_write(REG_CONFIG, CONFIG_START_CON);
+}
+
+esp_err_t ads1293_stop_conversion(void)
+{
+    // Standby rather than just clearing START_CON: powers the analog blocks
+    // down between windows but keeps every register, and writing START_CON
+    // later leaves standby directly (same as ProtoCentral's standby()/start()).
+    return reg_write(REG_CONFIG, CONFIG_STANDBY);
+}
+
+esp_err_t ads1293_read_lead_off(uint8_t *out_mask)
+{
+    uint8_t v = 0;
+    esp_err_t err = reg_read(REG_ERROR_LOD, &v);
+    if (err == ESP_OK) {
+        *out_mask = v & 0x3F;
+    }
+    return err;
+}
 
 esp_err_t ads1293_read_sample(int32_t *out_sample, uint32_t timeout_ms)
 {
