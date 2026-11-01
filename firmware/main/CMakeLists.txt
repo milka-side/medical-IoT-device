@@ -1,0 +1,20 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "wifi_connect.c"
+        "telemetry_http.c"
+        "telemetry_mqtt.c"
+        "ads1293.c"
+        "tmp117.c"
+        "max30102.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        esp_wifi
+        esp_netif
+        esp_event
+        nvs_flash
+        esp_http_client
+        mqtt
+        driver
+        esp_timer
+)
