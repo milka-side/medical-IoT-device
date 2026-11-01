@@ -1,0 +1,53 @@
+menu "Medical IoT Device"
+
+    config MIOT_WIFI_SSID
+        string "Wi-Fi SSID"
+        default "myssid"
+
+    config MIOT_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default "mypassword"
+
+    config MIOT_SERVER_URL
+        string "Server URL for telemetry POST"
+        default "http://192.168.1.100:3000/api/data"
+        help
+            Full URL of the web/server.js endpoint, e.g.
+            http://<IP of the computer running npm start>:3000/api/data
+
+    config MIOT_API_KEY
+        string "X-API-Key header (leave empty if server has none)"
+        default ""
+
+    config MIOT_DEVICE_ID
+        string "device_id reported to the server"
+        default "esp32c6-01"
+
+    config MIOT_MQTT_ENABLE
+        bool "Also publish telemetry over MQTT"
+        default n
+        help
+            Publishes the same JSON payload used for the HTTP POST to an
+            MQTT broker, on topic wearable/<device_id>/data - matches
+            web/src/mqtt-ingest.js's default subscription (wearable/+/data).
+            Runs alongside the HTTP POST, not instead of it.
+
+    config MIOT_MQTT_URL
+        string "MQTT broker URI (mqtt:// or mqtts://)"
+        depends on MIOT_MQTT_ENABLE
+        default "mqtt://192.168.1.100:1883"
+        help
+            Passed straight to esp-mqtt as broker.address.uri, e.g.
+            mqtt://<IP of the computer running the broker>:1883.
+
+    config MIOT_MQTT_USERNAME
+        string "MQTT username (leave empty if broker has none)"
+        depends on MIOT_MQTT_ENABLE
+        default ""
+
+    config MIOT_MQTT_PASSWORD
+        string "MQTT password (leave empty if broker has none)"
+        depends on MIOT_MQTT_ENABLE
+        default ""
+
+endmenu

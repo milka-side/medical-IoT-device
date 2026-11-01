@@ -1,0 +1,22 @@
+# Target: Seeed XIAO ESP32-C6 ("ESP32_C6 speed studio" on the schematic)
+CONFIG_IDF_TARGET="esp32c6"
+
+# Give the HTTP client / Wi-Fi events enough stack headroom
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Default single-app partition table (factory=1MB) is too small once
+# Wi-Fi+HTTP client+mbedTLS are linked in - use a bigger app partition.
+# XIAO ESP32-C6 has 4MB flash, so 3MB for the app leaves plenty of room.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Board (ESP32-C6FH4) has 4MB flash - confirmed via `esptool flash_id`.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# Local dev defaults (edit with `idf.py menuconfig` -> Medical IoT Device,
+# or change below) - open guest Wi-Fi, no password.
+CONFIG_MIOT_WIFI_SSID="UCU_Guest"
+CONFIG_MIOT_WIFI_PASSWORD=""
+CONFIG_MIOT_SERVER_URL="http://10.10.241.72:3000/api/data"
