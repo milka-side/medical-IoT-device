@@ -8,6 +8,7 @@
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -246,8 +247,16 @@ typedef struct {
 // malformed payload).
 static size_t build_telemetry_json(char *buf, size_t cap, const telemetry_t *t)
 {
+    // boot+seq identify each batch, so the server can drop the second copy
+    // when the same batch arrives over both HTTP and Azure IoT Hub.
+    static uint32_t s_boot_id;
+    static uint32_t s_seq;
+    if (s_boot_id == 0) {
+        s_boot_id = esp_random() | 1u;
+    }
     jbuf_t b = {.buf = buf, .cap = cap};
-    jb_append(&b, "{\"device_id\":\"%s\"", CONFIG_MIOT_DEVICE_ID);
+    jb_append(&b, "{\"device_id\":\"%s\",\"boot\":%lu,\"seq\":%lu", CONFIG_MIOT_DEVICE_ID,
+              (unsigned long)s_boot_id, (unsigned long)s_seq++);
 
     if (t->ecg_count > 0) {
         jb_append(&b, ",\"fs\":%.2f,\"ecg\":[", ECG_OUT_FS);

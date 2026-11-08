@@ -12,7 +12,28 @@ function broadcast(payload) {
   }
 }
 
+// The board can send the same batch over HTTP and via Azure IoT Hub; each
+// batch carries boot+seq, so remember recent ones and drop the repeat.
+const DEDUPE_TTL_MS = 120000;
+const seen = new Map();
+
+function isDuplicate(raw) {
+  if (!raw || typeof raw !== 'object' || raw.boot === undefined || raw.seq === undefined) return false;
+  const key = `${raw.device_id}|${raw.boot}|${raw.seq}`;
+  const now = Date.now();
+  if (seen.size > 5000) {
+    for (const [k, t] of seen) if (now - t > DEDUPE_TTL_MS) seen.delete(k);
+  }
+  if (seen.has(key) && now - seen.get(key) <= DEDUPE_TTL_MS) return true;
+  seen.set(key, now);
+  return false;
+}
+
 function ingest(raw, source) {
+  if (isDuplicate(raw)) {
+    stats.duplicates = (stats.duplicates || 0) + 1;
+    return { ok: true, duplicate: true };
+  }
   const res = normalize(raw);
   if (!res.ok) {
     stats.rejected++;
