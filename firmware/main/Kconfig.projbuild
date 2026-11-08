@@ -58,4 +58,35 @@ menu "Medical IoT Device"
         depends on MIOT_MQTT_ENABLE
         default ""
 
+    config MIOT_AZURE_ENABLE
+        bool "Also publish telemetry to Azure IoT Hub"
+        default n
+        help
+            Publishes the same JSON payload to Azure IoT Hub over MQTT
+            (mqtts://<hub>.azure-devices.net:8883, TLS, SAS token generated
+            on the device). The dashboard reads it back through the hub's
+            built-in Event Hub-compatible endpoint (web/src/azure-ingest.js).
+            Runs alongside the HTTP POST, not instead of it.
+
+    config MIOT_AZURE_CONNECTION_STRING
+        string "Azure IoT Hub device connection string"
+        depends on MIOT_AZURE_ENABLE
+        default ""
+        help
+            HostName=<hub>.azure-devices.net;DeviceId=<id>;SharedAccessKey=<key>
+            - the device's "Primary connection string" from the portal or
+            `az iot hub device-identity connection-string show`.
+            Keep it out of git: put it in sdkconfig.defaults.local or set
+            it in menuconfig (sdkconfig is not committed).
+
+    config MIOT_AZURE_IDLE_PERIOD_S
+        int "Seconds between idle status messages to Azure"
+        depends on MIOT_AZURE_ENABLE
+        range 1 3600
+        default 60
+        help
+            While no measurement is running only one status message per
+            this many seconds goes to Azure (measurement data is always
+            sent). The free F1 tier allows 8000 messages/day.
+
 endmenu

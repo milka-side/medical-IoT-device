@@ -4,6 +4,7 @@ idf_component_register(
         "wifi_connect.c"
         "telemetry_http.c"
         "telemetry_mqtt.c"
+        "telemetry_azure.c"
         "command_poll.c"
         "ads1293.c"
         "tmp117.c"
@@ -16,6 +17,7 @@ idf_component_register(
         nvs_flash
         esp_http_client
         mqtt
+        mbedtls
         driver
         esp_timer
 )

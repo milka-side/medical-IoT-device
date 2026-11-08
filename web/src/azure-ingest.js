@@ -17,7 +17,11 @@ function startAzureIngest(hub) {
       for (const event of events) {
         let data;
         try {
-          data = typeof event.body === 'string' ? JSON.parse(event.body) : event.body;
+          // Body arrives as a string, an already-parsed object, or raw bytes
+          // (Buffer/Uint8Array) depending on the message's content type.
+          let body = event.body;
+          if (body instanceof Uint8Array) body = Buffer.from(body).toString('utf8');
+          data = typeof body === 'string' ? JSON.parse(body) : body;
         } catch (e) {
           console.error('[azure] не вдалося розібрати повідомлення:', e.message);
           continue;

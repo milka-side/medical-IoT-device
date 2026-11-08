@@ -19,6 +19,7 @@
 #include "max30102.h"
 #include "pins.h"
 #include "telemetry_http.h"
+#include "telemetry_azure.h"
 #include "telemetry_mqtt.h"
 #include "tmp117.h"
 #include "wifi_connect.h"
@@ -451,6 +452,10 @@ static void sender_loop(void)
             if (telemetry_mqtt_publish(json, len) != ESP_OK) {
                 ESP_LOGW(TAG, "telemetry MQTT publish failed");
             }
+            bool idle = !boot_lockout && !(s_ecg_active || s_vitals_active || s_temp_active);
+            if (telemetry_azure_publish(json, len, idle) != ESP_OK) {
+                ESP_LOGW(TAG, "telemetry Azure publish failed");
+            }
         } else {
             ESP_LOGW(TAG, "Wi-Fi down, skipping POST (ecg_samples=%d)", n);
         }
@@ -511,6 +516,9 @@ void app_main(void)
 
     if (telemetry_mqtt_init() != ESP_OK) {
         ESP_LOGW(TAG, "MQTT telemetry init failed; continuing with HTTP only");
+    }
+    if (telemetry_azure_init() != ESP_OK) {
+        ESP_LOGW(TAG, "Azure IoT Hub telemetry init failed; continuing without it");
     }
 
 #if WIFI_DISABLED_FOR_TEST

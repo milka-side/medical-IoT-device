@@ -49,7 +49,7 @@ Medical IoT Device - це компактний носимий IoT-пристрі
 ```
  XIAO ESP32-C6 + сенсори ──Wi-Fi / USB──▶ сервер (Node.js) ──WebSocket──▶ вебпанель
                                                  ┆
-                                                 ┆ MQTT (готово) / Azure IoT Hub (під питанням)
+                                                 ┆ MQTT (готово) / Azure IoT Hub (готово)
                                                  ▼
                                    MQTT-брокер / Azure IoT Hub → Azure Functions
 ```
@@ -219,10 +219,9 @@ HTTP і MQTT можна тримати увімкненими одночасно
 сумісний ендпоінт) → сайт`. Код приймання (`web/src/azure-ingest.js`) і симулятор пристрою
 (`tools/azure-mock-sender.js`) повністю готові й покривають той самий формат даних, що й HTTP/MQTT.
 
-> **Статус:** використання Azure IoT Hub ще під питанням — команда наразі в процесі імплементації цього
-> рішення в проєкт. Код приймання даних (`azure-ingest.js`) і симулятор пристрою (`azure-mock-sender.js`)
-> вже готові; залишається підключити сам хаб, коли команда завершить налаштування Azure-підписки.
-> Коли це станеться — достатньо підставити connection string'и нижче, без жодних змін коду.
+Плата ESP32-C6 вміє слати телеметрію в хаб напряму (`firmware/main/telemetry_azure.c`): MQTT на порту
+8883, TLS (перевірка сертифіката через вбудований у ESP-IDF certificate bundle) і SAS-токен, який плата сама
+генерує з device connection string після синхронізації часу по SNTP і оновлює кожні ~24 години.
 
 ### 1. Створити хаб і пристрій (Azure CLI)
 
@@ -278,8 +277,30 @@ npm run mock:azure
 
 Відкрити http://localhost:3000 — дані від симулятора мають з'явитися так само, як і від `npm run mock`.
 
-Коли з'явиться справжня плата ESP32, вона підключатиметься до того ж IoT Hub по MQTT з device connection
-string, і дані так само дійдуть до сервера без жодних змін на його боці.
+### 3. Підключити плату ESP32-C6
+
+Створити `firmware/sdkconfig.defaults.local` (він у `.gitignore`, ключ не потрапить у git):
+
+```
+CONFIG_MIOT_AZURE_ENABLE=y
+CONFIG_MIOT_AZURE_CONNECTION_STRING="HostName=<hub>.azure-devices.net;DeviceId=esp32c6-01;SharedAccessKey=<key>"
+```
+
+Потім перезібрати з чистим `sdkconfig` (defaults застосовуються лише до ключів, яких у `sdkconfig` ще немає):
+
+```bash
+cd firmware
+rm -f sdkconfig
+idf.py build flash monitor
+```
+
+Або те саме через `idf.py menuconfig` → Medical IoT Device → *Also publish telemetry to Azure IoT Hub*.
+У лозі має з'явитися `telemetry_azure: connected to Azure IoT Hub ...`. HTTP-відправка на локальний сервер
+працює далі паралельно.
+
+Щоб не вибрати ліміт безкоштовного тіра F1 (8000 повідомлень на добу), у режимі очікування в Azure йде
+лише одне статусне повідомлення на хвилину (`MIOT_AZURE_IDLE_PERIOD_S`); під час вимірювання дані
+надсилаються щосекунди.
 
 ---
 
