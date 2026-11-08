@@ -227,15 +227,19 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio)
     // with no LL electrode that input floats, the common-mode estimate
     // picks up whatever it floats to, and the RLD amp then drives that
     // garbage back into the body as noise on Lead I.
-    reg_write(REG_FLEX_CH1_CN, 0x11);   // IN2(LA)-IN1(RA) -> channel 1 (Lead I)
-    reg_write(REG_CMDET_EN, 0x03);      // common-mode from IN1+IN2 only (RA, LA)
-    reg_write(REG_RLD_CN, 0x04);        // RLD amp output -> IN4 (RL electrode)
+    // Cable wiring on this board (continuity-checked): red/sleeve -> IN1,
+    // yellow/tip -> IN2, green/ring -> IN3. So LA = yellow on IN2, RA = green
+    // on IN3, RL = red on IN1 (nothing on IN4, which is why RLD there left
+    // the body without a return path and both leads read as off).
+    reg_write(REG_FLEX_CH1_CN, 0x13);   // IN2(LA)-IN3(RA) -> channel 1 (Lead I)
+    reg_write(REG_CMDET_EN, 0x06);      // common-mode from IN2+IN3 only (LA, RA)
+    reg_write(REG_RLD_CN, 0x01);        // RLD amp output -> IN1 (RL electrode)
 
     // DC lead-off detection on RA/LA (same LOD_CN/LOD_CURRENT ProtoCentral's
     // v2 library enables by default) - ERROR_LOD then reports which of the
     // two sensing electrodes has no skin contact.
     reg_write(REG_LOD_CN, 0x00);
-    reg_write(REG_LOD_EN, 0x03);
+    reg_write(REG_LOD_EN, 0x06);        // IN2 (LA) + IN3 (RA)
     reg_write(REG_LOD_CURRENT, 0x04);
 
     // Verified against ProtoCentral's own ads1293-arduino v2.0 startClock():
@@ -325,7 +329,9 @@ esp_err_t ads1293_read_lead_off(uint8_t *out_mask)
     uint8_t v = 0;
     esp_err_t err = reg_read(REG_ERROR_LOD, &v);
     if (err == ESP_OK) {
-        *out_mask = v & 0x3F;
+        // Remap to the bit0 = RA, bit1 = LA convention main.c/dashboard use:
+        // RA is IN3 (ERROR_LOD bit2), LA is IN2 (bit1).
+        *out_mask = (uint8_t)(((v >> 2) & 0x01) | (v & 0x02));
     }
     return err;
 }

@@ -24,7 +24,7 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio);
 esp_err_t ads1293_start_conversion(void);
 esp_err_t ads1293_stop_conversion(void);
 
-// ERROR_LOD bitmask, bit0 = IN1 (RA), bit1 = IN2 (LA): a set bit means that
+// Lead-off bitmask, bit0 = RA (IN3), bit1 = LA (IN2): a set bit means that
 // electrode has no skin contact. Only RA/LA have lead-off detection enabled.
 esp_err_t ads1293_read_lead_off(uint8_t *out_mask);
 
