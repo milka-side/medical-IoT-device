@@ -231,7 +231,9 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio)
     // yellow/tip -> IN2, green/ring -> IN3. So LA = yellow on IN2, RA = green
     // on IN3, RL = red on IN1 (nothing on IN4, which is why RLD there left
     // the body without a return path and both leads read as off).
-    reg_write(REG_FLEX_CH1_CN, 0x13);   // IN2(LA)-IN3(RA) -> channel 1 (Lead I)
+    // POS=IN3, NEG=IN2: with POS=IN2 (0x13) the QRS came out inverted on a
+    // real recording, so the colour<->limb assumption above is mirrored.
+    reg_write(REG_FLEX_CH1_CN, 0x1A);   // IN3-IN2 -> channel 1 (Lead I, upright QRS)
     reg_write(REG_CMDET_EN, 0x06);      // common-mode from IN2+IN3 only (LA, RA)
     reg_write(REG_RLD_CN, 0x01);        // RLD amp output -> IN1 (RL electrode)
 
