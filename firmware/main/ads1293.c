@@ -252,8 +252,8 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio)
     // 3-lead default only shut down channel 3: 0x24).
     reg_write(REG_AFE_SHDN_CN, 0x36);
     reg_write(REG_AFE_PACE_CN, 0x01);   // PACE_SHDN - pace channel unused here, shut its AFE down
-    reg_write(REG_R2_RATE, 0x02);       // R2 = 5 (one-hot encoding, see datasheet)
-    reg_write(REG_R3_RATE_CH1, 0x02);   // R3 = 6 -> 102400/(4*5*6) = 853.3 sps
+    reg_write(REG_R2_RATE, 0x01);       // R2 = 4 (one-hot encoding, see datasheet)
+    reg_write(REG_R3_RATE_CH1, 0x04);   // R3 = 8 -> 102400/(4*4*8) = 800 sps (decimated x4 to 200 Hz)
     reg_write(REG_DRDYB_SRC, 0x08);     // DRDYB pulses on channel 1 ECG ready
     reg_write(REG_CH_CNFG, 0x10);       // ECG read-back on channel 1 only
 
@@ -266,7 +266,7 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio)
 // Clinical "monitor mode" ECG bandwidth is 0.5-40 Hz (vs. 0.05-150 Hz for
 // diagnostic 12-lead) per AAMI/AHA practice and real monitor datasheets
 // (Philips, Edan), plus a separate notch at mains frequency. Tuned to that
-// spec at the actual ODR (~853.5 sps with the current R2/R3).
+// spec at the actual ODR (800 sps with the current R2/R3).
 //
 // The first version of the mains notch here was a double boxcar average,
 // which turned out to have a much lower effective cutoff than intended
@@ -280,22 +280,22 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio)
 // High-pass: EMA baseline tracker subtracted from the raw sample, cutoff
 // 0.5 Hz (alpha = 1 - exp(-2*pi*fc/fs)). Also sidesteps needing to know
 // the exact offset-binary zero point for this R2/R3 combo.
-#define BASELINE_ALPHA 0.0037
+#define BASELINE_ALPHA 0.003919
 
-// Narrow notch at 50 Hz, ~4 Hz wide, at fs ~= 853.5 sps:
-//   w0 = 2*pi*50/853.5 = 0.36809 rad, cos(w0) = 0.9332
-//   r  = 1 - 3*BW*pi/fs = 1 - 3*4*pi/853.5 = 0.95583
+// Narrow notch at 50 Hz, ~4 Hz wide, at fs = 800 sps:
+//   w0 = 2*pi*50/800 = 0.39270 rad, cos(w0) = 0.92388
+//   r  = 1 - 3*BW*pi/fs = 1 - 3*4*pi/800 = 0.95288
 //   b1 = -2*cos(w0), b2 = 1 (zeros at e^{+-j w0})
 //   a1 = -2*r*cos(w0), a2 = r^2 (poles at same angle, radius r)
 //   gain = (1+a1+a2)/(1+b1+b2), normalizes passband gain to ~1
-#define NOTCH_B1 (-1.8664)
+#define NOTCH_B1 (-1.847759)
 #define NOTCH_B2 (1.0)
-#define NOTCH_A1 (-1.78385)
-#define NOTCH_A2 (0.913614)
-#define NOTCH_GAIN (0.97135)
+#define NOTCH_A1 (-1.760685)
+#define NOTCH_A2 (0.907973)
+#define NOTCH_GAIN (0.967463)
 
 // Low-pass: single one-pole stage, cutoff 40 Hz (alpha = 1 - exp(-2*pi*fc/fs)).
-#define LOWPASS_ALPHA 0.25
+#define LOWPASS_ALPHA 0.2696
 
 static double s_baseline;
 static bool s_baseline_init = false;

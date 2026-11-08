@@ -32,7 +32,7 @@ let lastDataAt = 0;
 let wsOpen = false;
 let deviceId = null;
 const lastMeasuredAt = { hr: 0, spo2: 0, temp: 0, ecg: 0 }; // epoch ms, 0 = never measured
-let lastAdcSps = 0; // ADS1293 samples/s actually delivered, ~853 when nothing is dropped
+let lastAdcSps = 0; // ADS1293 samples/s actually delivered, ~800 when nothing is dropped
 
 // Robust autoscale: ignore only the most extreme ~0.2% of samples (a 1-2
 // sample motion spike), then pad the range. The previous 3%/97% cut
@@ -91,7 +91,7 @@ function refreshAges() {
     const time = new Date(lastMeasuredAt[key]).toLocaleTimeString('uk-UA', {
       hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
-    // Well under ~853 means the device is missing ADC samples, which
+    // Well under ~800 means the device is missing ADC samples, which
     // distorts the trace's time axis - worth seeing at a glance.
     const rate = key === 'ecg' && lastAdcSps ? ` · АЦП ${lastAdcSps} Гц` : '';
     el.textContent = `о ${time} (${fmtAgo(now - lastMeasuredAt[key])})${rate}`;

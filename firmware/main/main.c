@@ -71,7 +71,7 @@ static volatile bool s_vitals_running = false;
 
 // From ecg_task, -1 while ECG isn't running: ERROR_LOD bitmask (bit0 = RA,
 // bit1 = LA electrode off) and the ADC sample rate actually delivered
-// (should be ~853; lower means DRDY edges are being missed).
+// (should be ~800; lower means DRDY edges are being missed).
 static volatile int s_lod_mask = -1;
 static volatile int s_adc_sps = -1;
 
@@ -81,29 +81,29 @@ static volatile int s_adc_sps = -1;
 static double s_hr_sum, s_spo2_sum, s_temp_sum;
 static int s_hr_count, s_spo2_count, s_temp_count;
 
-// ADS1293's actual output rate (~850 sps with the current R2/R3) is far
+// ADS1293's actual output rate (800 sps with the current R2/R3) is far
 // denser than a dashboard chart needs, and was making the line look like a
 // fuzzy band just from too many points per pixel column. The signal is
 // already low-pass filtered to ~40 Hz inside ads1293_read_sample, but that
 // filter is a single IIR pole (-20 dB/decade) - at the decimated Nyquist
-// (~853.5/8/2 ~= 53 Hz) it's only attenuated a few dB, so mains/muscle
+// (800/4/2 = 100 Hz) it's only attenuated a few dB, so mains/muscle
 // content just above 40 Hz would alias back into the 0-40 Hz band if we
-// just picked every 8th sample. Instead we average all ECG_DECIMATION raw
+// just picked every 4th sample. Instead we average all ECG_DECIMATION raw
 // samples per output point (boxcar filter): its response has nulls at
 // every multiple of the decimated rate, which gives much better rejection
 // right where naive decimation would alias, on top of the existing IIR
 // stage - as well as a lighter, cleaner-looking stream.
-#define ECG_DECIMATION 8
+#define ECG_DECIMATION 4 // 800 sps / 4 = 200 Hz output
 
 // Fixed by the ADS1293 crystal and R1/R2/R3, not by how often we happen to
 // send - so it's reported as-is instead of measured per batch (a partial
 // first/last batch of a window used to come out as e.g. "30 Hz" and the
 // dashboard then stretched that batch across the whole chart).
-#define ECG_RAW_SPS (102400.0 / (4 * 5 * 6))
+#define ECG_RAW_SPS (102400.0 / (4 * 4 * 8))
 #define ECG_OUT_FS  (ECG_RAW_SPS / ECG_DECIMATION)
 
 // Electrode-contact / delivered-rate check cadence, in raw samples (~1 s).
-#define LOD_CHECK_EVERY_SAMPLES 853
+#define LOD_CHECK_EVERY_SAMPLES 800
 
 static void ecg_task(void *arg)
 {
