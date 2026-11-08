@@ -39,7 +39,7 @@ static QueueHandle_t s_ecg_queue;
 
 // No measurement can start until this many seconds after boot (dashboard
 // shows a countdown and disables the buttons for this long too).
-#define BOOT_LOCKOUT_S   (10 * 60)
+#define BOOT_LOCKOUT_S   0 // lockout removed: measurements allowed right after boot
 
 // How long one button press keeps its sensor powered on.
 #define ECG_MEASURE_S    (10 * 60)
