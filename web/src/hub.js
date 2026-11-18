@@ -29,7 +29,21 @@ function isDuplicate(raw) {
   return false;
 }
 
+// INGEST_ONLY=azure (comma-separated list) shows only data that arrived
+// over those paths - e.g. to watch the Azure IoT Hub path on its own. The
+// device's HTTP posts are still answered (dashboard commands ride on the
+// response), their data just isn't used.
+const INGEST_ONLY = (process.env.INGEST_ONLY || '').split(',').map((s) => s.trim()).filter(Boolean);
+
 function ingest(raw, source) {
+  // Per-path arrival count (duplicates included), so /api/health shows
+  // which paths - http / mqtt / azure - are actually delivering.
+  stats.by_source = stats.by_source || {};
+  stats.by_source[source] = (stats.by_source[source] || 0) + 1;
+  if (INGEST_ONLY.length && !INGEST_ONLY.includes(source)) {
+    stats.ignored = (stats.ignored || 0) + 1;
+    return { ok: true, ignored: true };
+  }
   if (isDuplicate(raw)) {
     stats.duplicates = (stats.duplicates || 0) + 1;
     return { ok: true, duplicate: true };
