@@ -9,6 +9,7 @@ const { startMqttIngest } = require('./src/mqtt-ingest');
 const { startAzureIngest } = require('./src/azure-ingest');
 const commands = require('./src/commands');
 const history = require('./src/history');
+const azureCommands = require('./src/azure-commands');
 
 hub.addListener(history.observe);
 history.setNotifier((payload) => hub.broadcast(payload));
@@ -177,12 +178,25 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/command') {
-      // Дашборд ставить команду тут; пристрій забирає її через GET нижче.
+      // A dashboard button. First choice: an Azure IoT Hub direct method -
+      // the device answers right away whether it will do it. If Azure isn't
+      // configured or the device isn't connected to the hub, the command is
+      // queued for the device's next HTTP telemetry post instead.
       let parsed;
       try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: 'некоректний JSON' }); }
       const deviceId = String(parsed.device_id ?? '').slice(0, 64);
       if (!deviceId) return sendJson(res, 400, { error: 'відсутній device_id' });
+      if (!commands.VALID_TYPES.has(parsed.type)) {
+        return sendJson(res, 400, { ok: false, error: `невідома команда: ${parsed.type}` });
+      }
+      const az = await azureCommands.sendCommand(parsed.type);
+      if (az && az.delivered) {
+        if (az.status === 200) return sendJson(res, 200, { ok: true, online: true, via: 'azure' });
+        return sendJson(res, 409, { ok: false, via: 'azure', error: az.reason || `код ${az.status}` });
+      }
       const result = commands.setCommand(deviceId, parsed.type);
+      result.via = 'http';
+      if (az) console.log(`[azure] direct method не вдався (${az.error}) - команда піде через HTTP`);
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 
@@ -258,9 +272,11 @@ wss.on('connection', (ws) => hub.addClient(ws));
 
 startMqttIngest(hub);
 startAzureIngest(hub);
+azureCommands.startAzureCommands();
 
 server.listen(PORT, HOST, () => {
   console.log(`Панель: http://localhost:${PORT}`);
   console.log(`Прийом даних: POST http://<IP цього комп'ютера>:${PORT}/api/data`);
   if (API_KEY) console.log('Увімкнено перевірку API-Key');
+  if (process.env.INGEST_ONLY) console.log(`Показуються лише дані з: ${process.env.INGEST_ONLY}`);
 });

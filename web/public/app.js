@@ -288,7 +288,11 @@ sdBtn.addEventListener('click', async () => {
       body: JSON.stringify({ device_id: deviceId, type: 'sd_upload' }),
     });
     const out = await r.json();
-    if (!r.ok) return showNotice(`Сервер не прийняв команду: ${out.error || r.status}`);
+    if (!r.ok) {
+      return showNotice(out.via === 'azure'
+        ? `Пристрій не виконає команду: ${out.error}`
+        : `Сервер не прийняв команду: ${out.error || r.status}`);
+    }
     if (!out.online) return showNotice('Пристрій зараз не на зв\'язку.');
     sdUploadUntil = Date.now() + 120 * 1000;
     sdBtn.disabled = true;
@@ -365,7 +369,9 @@ for (const btn of [...measureButtons, $('btn-force')]) {
       });
       const out = await r.json();
       if (!r.ok) {
-        showNotice(`Сервер не прийняв команду: ${out.error || r.status}`);
+        showNotice(out.via === 'azure'
+          ? `Пристрій не виконає команду: ${out.error}`
+          : `Сервер не прийняв команду: ${out.error || r.status}`);
       } else if (!out.online) {
         showNotice('Пристрій зараз не на зв\'язку. Вимір почнеться, якщо він підключиться протягом 30 секунд.');
       }
