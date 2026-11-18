@@ -5,10 +5,13 @@ idf_component_register(
         "telemetry_http.c"
         "telemetry_mqtt.c"
         "telemetry_azure.c"
-        "command_poll.c"
+        "device_commands.c"
         "ads1293.c"
         "tmp117.c"
         "max30102.c"
+        "sd_logger.c"
+        "offline_log.c"
+        "sd_upload.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_wifi
@@ -20,4 +23,10 @@ idf_component_register(
         mbedtls
         driver
         esp_timer
+        esp_pm
+        esp_driver_usb_serial_jtag
+        fatfs
+        esp_driver_sdspi
+        esp_partition
+        sdmmc
 )

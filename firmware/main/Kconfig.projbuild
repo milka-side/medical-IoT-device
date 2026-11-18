@@ -23,13 +23,75 @@ menu "Medical IoT Device"
         string "device_id reported to the server"
         default "esp32c6-01"
 
-    config MIOT_COMMAND_URL
-        string "Server URL for command polling (GET /api/command)"
-        default "http://192.168.1.100:3000/api/command"
+    config MIOT_SPO2_COEF_A_X100
+        int "SpO2 curve SpO2 = A - B*R: A x100"
+        default 11000
         help
-            Same host/port as Server URL above, just the /api/command
-            endpoint. Polled once a second while idle so a dashboard button
-            press is picked up within ~1s without keeping a connection open.
+            Intercept of the linear SpO2 calibration, in hundredths
+            (11000 = 110.00). Default is the common uncalibrated 110 - 25*R.
+
+    config MIOT_SPO2_COEF_B_X100
+        int "SpO2 curve SpO2 = A - B*R: B x100"
+        default 2500
+        help
+            Slope of the linear SpO2 calibration, in hundredths (2500 = 25.00).
+
+    config MIOT_MAX30102_LEDS_SWAPPED
+        bool "MAX30102 board has red and IR LEDs swapped"
+        default n
+        help
+            Some MAX30102 breakout boards have the two LEDs fitted the other
+            way round (datasheet: LED1 = red, LED2 = IR). Check with the LED
+            test in calibration mode: if the visibly red glow appears while
+            only LED2 is on, enable this.
+
+    config MIOT_TEMP_TISSUE_K_X100
+        int "Body-temperature estimate: tissue/ambient coefficient k, x100"
+        default 19
+        help
+            The TMP117 (factory-accurate, +-0.1 C) reads fingertip skin
+            temperature, which is what the dashboard shows. The approximate
+            body temperature shown next to it is computed, not a fixed
+            offset: heat flows from the body core through the finger out to
+            the room, so the core is warmer than the skin by an amount that
+            grows with the skin-to-room difference:
+                body = skin + k * (skin - room)
+            "room" is measured by the same sensor while nobody touches it.
+            k = 0.19 (19) from a healthy adult: skin 35.43 C, room 28.83 C,
+            body ~36.7 C.
+
+    config MIOT_BOOT_LOCKOUT_S
+        int "No measurements for this many seconds after power-on"
+        range 0 3600
+        default 600
+        help
+            Sensor warm-up: measurement requests are ignored for this long
+            after the board powers on and the dashboard shows a countdown.
+            "Виміряти все одно" on the dashboard or a double press on the
+            button still starts a measurement. 0 disables the lockout.
+
+    config MIOT_CALIBRATION_MODE
+        bool "Calibration mode (raw sensor values to serial, everything always on)"
+        default n
+        help
+            For calibrating: skips the boot lockout, keeps ECG, pulse/SpO2
+            and temperature measuring continuously, and prints one line per
+            second to the serial console:
+            CAL,uptime_s,temp_c_raw,ir_dc,ir_ac_rms,red_dc,red_ac_rms,R,hr,quality,spo2,finger,pulse_ok,lod,adc_sps,dup_reads
+            and ECG,<sample> lines at 200 Hz. Wi-Fi stays off (no network noise).
+            Never leave this on in a normal build.
+
+    config MIOT_LIGHT_SLEEP
+        bool "Light-sleep between telemetry posts when nothing is measured"
+        depends on PM_ENABLE
+        default y
+        help
+            With power management enabled the CPU already drops to 40 MHz
+            when idle; this additionally lets the chip light-sleep between
+            the once-a-second posts while no ECG/pulse window is open.
+            While the USB Serial/JTAG port is plugged into a computer the
+            chip stays awake anyway (USJ_NO_AUTO_LS_ON_CONNECTION), so
+            flashing and the serial monitor keep working.
 
     config MIOT_MQTT_ENABLE
         bool "Also publish telemetry over MQTT"

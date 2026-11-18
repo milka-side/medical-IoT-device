@@ -5,10 +5,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
+#include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
+#include "esp_pm.h"
+#include "esp_netif_sntp.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -16,9 +21,12 @@
 #include "nvs_flash.h"
 
 #include "ads1293.h"
-#include "command_poll.h"
+#include "device_commands.h"
 #include "max30102.h"
 #include "pins.h"
+#include "offline_log.h"
+#include "sd_logger.h"
+#include "sd_upload.h"
 #include "telemetry_http.h"
 #include "telemetry_azure.h"
 #include "telemetry_mqtt.h"
@@ -39,14 +47,20 @@ static const char *TAG = "main";
 
 static QueueHandle_t s_ecg_queue;
 
-// No measurement can start until this many seconds after boot (dashboard
-// shows a countdown and disables the buttons for this long too).
-#define BOOT_LOCKOUT_S   0 // lockout removed: measurements allowed right after boot
+// No measurement can start until this many seconds after power-on
+// (CONFIG_MIOT_BOOT_LOCKOUT_S, 0 = off): the dashboard shows a countdown and
+// keeps the buttons disabled for this long, and button presses that still
+// arrive in the meantime are ignored here.
+#ifdef CONFIG_MIOT_CALIBRATION_MODE
+#define BOOT_LOCKOUT_S   0 // calibration needs the sensors right away
+#else
+#define BOOT_LOCKOUT_S   CONFIG_MIOT_BOOT_LOCKOUT_S
+#endif
 
 // How long one button press keeps its sensor powered on.
 #define ECG_MEASURE_S    (10 * 60)
-#define VITALS_MEASURE_S 120
-#define TEMP_MEASURE_S   60
+#define VITALS_MEASURE_S (3 * 60)
+#define TEMP_MEASURE_S   (3 * 60)
 
 #define US_PER_S 1000000LL
 
@@ -76,12 +90,37 @@ static volatile bool s_vitals_running = false;
 // (should be ~800; lower means DRDY edges are being missed).
 static volatile int s_lod_mask = -1;
 static volatile int s_adc_sps = -1;
+static volatile int s_adc_dups = -1; // repeated-sample reads per ~1 s (calibration diagnostic)
 
-// Running average accumulators for the current measurement window - the
-// reported hr/spo2/temp are the mean over the whole window so far (not a
-// single instantaneous sample), reset to empty each time a window opens.
-static double s_hr_sum, s_spo2_sum, s_temp_sum;
-static int s_hr_count, s_spo2_count, s_temp_count;
+// Pulse/SpO2 and temperature are reported once, when their 3-minute window
+// ends - the average over the window - not as a live running number (early
+// in a window that showed whatever the first few seconds happened to read).
+static double s_hr_sum, s_spo2_sum;
+static int s_hr_count, s_spo2_count;
+
+// Temperature: every 1 s reading of the window, so the result can skip the
+// first part where the sensor is still warming up to the finger (that part
+// depends on whether the sensor started cold or still warm from the last
+// measurement, and made back-to-back measurements disagree).
+#define TEMP_MAX_SAMPLES (TEMP_MEASURE_S + 60)
+static float s_temp_samples[TEMP_MAX_SAMPLES];
+static int s_temp_n;
+// Settled = the reading moves less than TEMP_SETTLE_DELTA_C over the next
+// TEMP_SETTLE_SPAN_S seconds; everything from there on is averaged.
+#define TEMP_SETTLE_SPAN_S  20
+#define TEMP_SETTLE_DELTA_C 0.10f
+
+// Room temperature for the body-temperature estimate: the TMP117 read
+// every ROOM_SAMPLE_S while no temperature window is open. Follows a drop
+// at once but rises only slowly (ROOM_RISE_C per sample), so a finger
+// resting on the sensor for a while isn't mistaken for a warm room.
+#define ROOM_SAMPLE_S 10
+#define ROOM_RISE_C   0.02f
+static float s_room_c = NAN;
+static float s_window_room_c = NAN; // room temperature when the window opened
+
+// Set when a window closes: the next telemetry line carries its result.
+static bool s_vitals_result_pending, s_temp_result_pending;
 
 // ADS1293's actual output rate (800 sps with the current R2/R3) is far
 // denser than a dashboard chart needs, and was making the line look like a
@@ -147,6 +186,7 @@ static void ecg_task(void *arg)
                     s_adc_sps = (int)lround(LOD_CHECK_EVERY_SAMPLES * (double)US_PER_S / (now_us - window_start_us));
                 }
                 window_start_us = now_us;
+                s_adc_dups = (int)ads1293_take_duplicate_count();
                 uint8_t mask;
                 if (ads1293_read_lead_off(&mask) == ESP_OK) {
                     s_lod_mask = mask;
@@ -161,10 +201,9 @@ static void ecg_task(void *arg)
             decim_counter = 0;
             decim_sum = 0;
 
-#if WIFI_DISABLED_FOR_TEST
+#if WIFI_DISABLED_FOR_TEST || defined(CONFIG_MIOT_CALIBRATION_MODE)
             // Plain printf (not ESP_LOGI) so it's easy to grep/parse out of
-            // the serial log for a quick stats check, same as the ones run
-            // against the WebSocket feed when Wi-Fi was on.
+            // the serial log - the only ECG path when Wi-Fi is off.
             printf("ECG,%ld\n", (long)avg);
 #endif
 
@@ -189,6 +228,25 @@ static void ppg_task(void *arg)
         if (want != running) {
             if (want) {
                 max30102_start();
+#ifdef CONFIG_MIOT_CALIBRATION_MODE
+                // LED identity test: 10 s LED1 only, 10 s LED2 only, then
+                // both. Whichever phase shows the visible red glow is the red
+                // LED. Polling continues so the levels are logged too.
+                static const struct {
+                    const char *name;
+                    uint8_t led1, led2;
+                } phases[] = {{"LED1_ONLY", 0x24, 0x00}, {"LED2_ONLY", 0x00, 0x24}};
+                for (int p = 0; p < 2; p++) {
+                    printf("LEDTEST,%s\n", phases[p].name);
+                    max30102_set_led_currents(phases[p].led1, phases[p].led2);
+                    for (int i = 0; i < 1000; i++) { // 10 s
+                        max30102_poll();
+                        vTaskDelay(pdMS_TO_TICKS(10));
+                    }
+                }
+                printf("LEDTEST,BOTH\n");
+                max30102_set_led_currents(0x24, 0x24);
+#endif
             } else {
                 max30102_stop();
             }
@@ -234,29 +292,39 @@ typedef struct {
     const int32_t *ecg;
     int ecg_count;
     bool temp_ok;
-    float temp_c;
+    float temp_c;       // measured fingertip (skin) temperature
+    float temp_body_c;  // estimated body temperature, NAN if unknown
+    float temp_room_c;  // room temperature used for it
     bool vitals_ok;
     int hr, spo2;
     const char *status;
     // -1 = omit the field
     int lockout_remaining_s, ecg_remaining_s, vitals_remaining_s, temp_remaining_s;
     int lod_mask, adc_sps;
+    int sd_files; // measurement files waiting on the SD card, -1 = no card
 } telemetry_t;
+
+// Random per power-on id: with "seq" it identifies each batch, so the server
+// can drop the second copy when the same batch arrives over both HTTP and
+// Azure IoT Hub; offline/SD data also carries it so the server can date it.
+static uint32_t s_boot_id;
+
+static uint32_t boot_id(void)
+{
+    if (s_boot_id == 0) {
+        s_boot_id = esp_random() | 1u;
+    }
+    return s_boot_id;
+}
 
 // Returns the JSON length, or 0 if it didn't fit (never sends a cut-off,
 // malformed payload).
 static size_t build_telemetry_json(char *buf, size_t cap, const telemetry_t *t)
 {
-    // boot+seq identify each batch, so the server can drop the second copy
-    // when the same batch arrives over both HTTP and Azure IoT Hub.
-    static uint32_t s_boot_id;
     static uint32_t s_seq;
-    if (s_boot_id == 0) {
-        s_boot_id = esp_random() | 1u;
-    }
     jbuf_t b = {.buf = buf, .cap = cap};
     jb_append(&b, "{\"device_id\":\"%s\",\"boot\":%lu,\"seq\":%lu", CONFIG_MIOT_DEVICE_ID,
-              (unsigned long)s_boot_id, (unsigned long)s_seq++);
+              (unsigned long)boot_id(), (unsigned long)s_seq++);
 
     if (t->ecg_count > 0) {
         jb_append(&b, ",\"fs\":%.2f,\"ecg\":[", ECG_OUT_FS);
@@ -267,6 +335,9 @@ static size_t build_telemetry_json(char *buf, size_t cap, const telemetry_t *t)
     }
     if (t->temp_ok) {
         jb_append(&b, ",\"temp\":%.2f", t->temp_c);
+        if (!isnan(t->temp_body_c)) {
+            jb_append(&b, ",\"temp_body\":%.2f,\"temp_room\":%.2f", t->temp_body_c, t->temp_room_c);
+        }
     }
     if (t->vitals_ok) {
         jb_append(&b, ",\"hr\":%d,\"spo2\":%d", t->hr, t->spo2);
@@ -286,6 +357,9 @@ static size_t build_telemetry_json(char *buf, size_t cap, const telemetry_t *t)
     }
     if (t->lod_mask >= 0) {
         jb_append(&b, ",\"lod\":%d", t->lod_mask);
+    }
+    if (t->sd_files >= 0) {
+        jb_append(&b, ",\"sd_files\":%d", t->sd_files);
     }
     if (t->adc_sps >= 0) {
         jb_append(&b, ",\"adc_sps\":%d", t->adc_sps);
@@ -313,11 +387,11 @@ static int remaining_s(int64_t deadline_us, int64_t now_us)
 // ecg_task/ppg_task see the flag flip and power the sensor up.
 static void apply_command(measure_cmd_t cmd, int64_t now_us)
 {
-    if (cmd == MEASURE_ECG || cmd == MEASURE_ALL) {
+    if (cmd & MEASURE_ECG) {
         s_ecg_deadline_us = now_us + ECG_MEASURE_S * US_PER_S;
         s_ecg_active = true;
     }
-    if (cmd == MEASURE_VITALS || cmd == MEASURE_ALL) {
+    if (cmd & MEASURE_VITALS) {
         if (!s_vitals_active) {
             s_hr_sum = s_spo2_sum = 0;
             s_hr_count = s_spo2_count = 0;
@@ -325,10 +399,10 @@ static void apply_command(measure_cmd_t cmd, int64_t now_us)
         s_vitals_deadline_us = now_us + VITALS_MEASURE_S * US_PER_S;
         s_vitals_active = true;
     }
-    if (cmd == MEASURE_TEMP || cmd == MEASURE_ALL) {
+    if (cmd & MEASURE_TEMP) {
         if (!s_temp_active) {
-            s_temp_sum = 0;
-            s_temp_count = 0;
+            s_temp_n = 0;
+            s_window_room_c = s_room_c;
         }
         s_temp_deadline_us = now_us + TEMP_MEASURE_S * US_PER_S;
         s_temp_active = true; // TMP117 stays on regardless (negligible draw)
@@ -344,35 +418,283 @@ static void close_expired_windows(int64_t now_us)
     }
     if (s_vitals_active && now_us >= s_vitals_deadline_us) {
         s_vitals_active = false;
+        s_vitals_result_pending = true;
     }
     if (s_temp_active && now_us >= s_temp_deadline_us) {
         s_temp_active = false;
+        s_temp_result_pending = true;
     }
+}
+
+// Mean skin temperature over the settled part of the window (see
+// TEMP_SETTLE_*); if it never settled, the last minute. False if no reading.
+static bool temp_window_result(float *out_skin, int *out_settled_after_s)
+{
+    if (s_temp_n == 0) {
+        return false;
+    }
+    int start = -1;
+    for (int i = 0; i + TEMP_SETTLE_SPAN_S < s_temp_n; i++) {
+        if (fabsf(s_temp_samples[i + TEMP_SETTLE_SPAN_S] - s_temp_samples[i]) < TEMP_SETTLE_DELTA_C) {
+            start = i;
+            break;
+        }
+    }
+    if (start < 0) {
+        start = s_temp_n > 60 ? s_temp_n - 60 : 0;
+    }
+    double sum = 0;
+    for (int i = start; i < s_temp_n; i++) {
+        sum += s_temp_samples[i];
+    }
+    *out_skin = (float)(sum / (s_temp_n - start));
+    *out_settled_after_s = start;
+    return true;
+}
+
+// Power management (CONFIG_PM_ENABLE): when nothing is being measured the
+// CPU drops to 40 MHz and, with CONFIG_MIOT_LIGHT_SLEEP, the chip light-
+// sleeps between the once-a-second telemetry posts (Wi-Fi modem-sleep keeps
+// the association alive meanwhile). These locks are held only while an ECG
+// or pulse window is open: ECG needs every DRDY interrupt at 800 Hz on time
+// and full CPU speed for the filter chain, and MAX30102 is polled every 10 ms.
+static esp_pm_lock_handle_t s_pm_no_sleep, s_pm_cpu_max;
+// Separate pair held while a computer is attached over USB: idle DFS/light
+// sleep made the USB Serial/JTAG port stop responding (flashing failed with
+// "Protocol error" until the chip was put in download mode by hand), even
+// with CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION. On battery nothing is attached
+// and the savings apply as before.
+static esp_pm_lock_handle_t s_pm_usb_no_sleep, s_pm_usb_cpu_max;
+
+static void power_init(void)
+{
+#if CONFIG_PM_ENABLE
+    esp_pm_config_t pm = {
+        .max_freq_mhz = 160,
+        .min_freq_mhz = 40,
+#ifdef CONFIG_MIOT_LIGHT_SLEEP
+        .light_sleep_enable = true,
+#else
+        .light_sleep_enable = false,
+#endif
+    };
+    esp_err_t err = esp_pm_configure(&pm);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_pm_configure failed: %s - running without power management", esp_err_to_name(err));
+    }
+    esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "measuring", &s_pm_no_sleep);
+    esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "measuring", &s_pm_cpu_max);
+    esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb_host", &s_pm_usb_no_sleep);
+    esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "usb_host", &s_pm_usb_cpu_max);
+    // Take them right away: at boot the board is usually still on the USB
+    // cable it was just flashed over. update_usb_power() releases them
+    // within a second if nothing is actually attached.
+    if (s_pm_usb_no_sleep && s_pm_usb_cpu_max) {
+        esp_pm_lock_acquire(s_pm_usb_no_sleep);
+        esp_pm_lock_acquire(s_pm_usb_cpu_max);
+    }
+#endif
+}
+
+static void power_set_measuring(bool measuring)
+{
+    if (s_pm_no_sleep == NULL || s_pm_cpu_max == NULL) {
+        return; // power management not enabled in this build
+    }
+    if (measuring) {
+        esp_pm_lock_acquire(s_pm_no_sleep);
+        esp_pm_lock_acquire(s_pm_cpu_max);
+    } else {
+        esp_pm_lock_release(s_pm_cpu_max);
+        esp_pm_lock_release(s_pm_no_sleep);
+    }
+}
+
+// Keeps the chip fully awake while a USB host is attached (see s_pm_usb_*).
+static void update_usb_power(void)
+{
+    static bool held = true; // acquired in power_init()
+    if (s_pm_usb_no_sleep == NULL || s_pm_usb_cpu_max == NULL) {
+        return;
+    }
+    bool attached = usb_serial_jtag_is_connected();
+    if (attached != held) {
+        held = attached;
+        if (attached) {
+            esp_pm_lock_acquire(s_pm_usb_no_sleep);
+            esp_pm_lock_acquire(s_pm_usb_cpu_max);
+        } else {
+            esp_pm_lock_release(s_pm_usb_cpu_max);
+            esp_pm_lock_release(s_pm_usb_no_sleep);
+        }
+    }
+}
+
+// Brings radio / CPU power state in line with which windows are open.
+static void update_power_state(bool *wifi_ps_on, bool *power_measuring)
+{
+    // Modem-sleep (ESP-IDF's default for STA) wakes the radio every beacon
+    // interval, ~102 ms - those periodic current pulses land at ~10 Hz,
+    // right inside the ECG band where no filter can remove them. Keep the
+    // radio fully awake while ECG is recording, doze otherwise.
+    if (s_ecg_active == *wifi_ps_on) {
+        *wifi_ps_on = !s_ecg_active;
+        wifi_connect_set_power_save(*wifi_ps_on);
+    }
+    bool measuring = s_ecg_active || s_vitals_active;
+    if (measuring != *power_measuring) {
+        *power_measuring = measuring;
+        power_set_measuring(measuring);
+    }
+}
+
+static const char *reset_reason_str(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_EXT:       return "external pin";
+    case ESP_RST_SW:        return "software restart";
+    case ESP_RST_PANIC:     return "PANIC (crash)";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "task watchdog";
+    case ESP_RST_WDT:       return "other watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep sleep wake";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT (supply voltage dropped)";
+    case ESP_RST_SDIO:      return "SDIO";
+    case ESP_RST_USB:       return "USB (flashing/monitor)";
+    case ESP_RST_JTAG:      return "JTAG";
+    default:                return "unknown";
+    }
+}
+
+// ---- Manual measurement button (D1: 0 at rest, 1 while pressed) ----
+//
+// High-level interrupt; the ISR masks the pin right away, so a held
+// button doesn't retrigger; the sender task unmasks it once the button
+// has been released for BUTTON_RELEASE_MS (that also debounces).
+#define BUTTON_RELEASE_MS 50
+#define DOUBLE_PRESS_MS   700
+
+static TaskHandle_t s_sender_task;
+static volatile bool s_button_pressed;
+static volatile uint32_t s_button_irqs; // diagnostic: ISR hits since boot
+
+static void button_isr(void *arg)
+{
+    gpio_intr_disable(PIN_BUTTON);
+    s_button_irqs++;
+    s_button_pressed = true;
+    BaseType_t woken = pdFALSE;
+    if (s_sender_task != NULL) {
+        vTaskNotifyGiveFromISR(s_sender_task, &woken);
+    }
+    if (woken) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static void button_init(void)
+{
+    gpio_config_t io = {
+        .pin_bit_mask = 1ULL << PIN_BUTTON,
+        .mode = GPIO_MODE_INPUT,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .intr_type = GPIO_INTR_HIGH_LEVEL,
+    };
+    gpio_config(&io);
+    // GPIO ISR service is already installed by ads1293_init() (called earlier).
+    gpio_isr_handler_add(PIN_BUTTON, button_isr, NULL);
+}
+
+// Re-arms the button interrupt once it has been released. Returns true
+// while it is still waiting for the release.
+static bool button_rearm_pending(void)
+{
+    static int64_t released_since_us = -1;
+    if (!s_button_pressed) {
+        return false;
+    }
+    if (gpio_get_level(PIN_BUTTON) != 0) {
+        released_since_us = -1;
+        return true;
+    }
+    int64_t now = esp_timer_get_time();
+    if (released_since_us < 0) {
+        released_since_us = now;
+    }
+    if (now - released_since_us < BUTTON_RELEASE_MS * 1000LL) {
+        return true;
+    }
+    released_since_us = -1;
+    s_button_pressed = false;
+    gpio_intr_enable(PIN_BUTTON);
+    return false;
 }
 
 static void sender_loop(void)
 {
     int32_t *ecg_batch = malloc(ECG_DRAIN_MAX * sizeof(int32_t));
     bool wifi_ps_on = true;
+    bool power_measuring = false;
+    bool in_session = false;       // a measurement is running (or just ended this tick)
+    int idle_ticks = 0;            // consecutive ticks with every window closed
+    int64_t next_copy_try_us = 0;  // SD copy retry throttle (no card, write error)
+    TickType_t next_tick = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
+
+    int presses = 0;               // button presses in the current single/double-press window
+    int64_t first_press_us = 0;
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // Button: one press = measure everything; two presses within
+        // DOUBLE_PRESS_MS = measure everything even during the warm-up.
+        if (presses > 0 && esp_timer_get_time() - first_press_us >= DOUBLE_PRESS_MS * 1000LL) {
+            bool force = presses >= 2;
+            presses = 0;
+            if (esp_timer_get_time() < BOOT_LOCKOUT_S * US_PER_S && !force) {
+                ESP_LOGW(TAG, "button pressed during the warm-up - press twice to measure anyway");
+            } else {
+                ESP_LOGI(TAG, "button %s - measuring everything", force ? "pressed twice" : "pressed");
+                apply_command(MEASURE_ALL, esp_timer_get_time());
+                update_power_state(&wifi_ps_on, &power_measuring);
+            }
+        }
+
+        // Sleep until the next 1 s tick, waking early for a button press.
+        TickType_t now_ticks = xTaskGetTickCount();
+        if ((int32_t)(next_tick - now_ticks) > 0) {
+            TickType_t wait = next_tick - now_ticks;
+            if ((s_button_pressed || presses > 0) && wait > pdMS_TO_TICKS(20)) {
+                wait = pdMS_TO_TICKS(20); // poll for the release / the double-press window
+            }
+            if (ulTaskNotifyTake(pdTRUE, wait) > 0) {
+                if (presses == 0) {
+                    first_press_us = esp_timer_get_time();
+                }
+                presses++;
+            }
+            button_rearm_pending();
+            continue;
+        }
+        next_tick += pdMS_TO_TICKS(1000);
+        if ((int32_t)(xTaskGetTickCount() - next_tick) > 0) {
+            next_tick = xTaskGetTickCount() + pdMS_TO_TICKS(1000); // fell behind (slow POST)
+        }
+        button_rearm_pending();
+
+        static int s_rst_log_tick;
+        if (++s_rst_log_tick >= 10) {
+            s_rst_log_tick = 0;
+            ESP_LOGW(TAG, "uptime %lld s, last reset: %s, free heap %lu, button pin=%d irqs=%lu",
+                     esp_timer_get_time() / US_PER_S, reset_reason_str(esp_reset_reason()),
+                     (unsigned long)esp_get_free_heap_size(), gpio_get_level(PIN_BUTTON),
+                     (unsigned long)s_button_irqs);
+        }
 
         bool boot_lockout = esp_timer_get_time() < BOOT_LOCKOUT_S * US_PER_S;
-        if (!boot_lockout) {
-            measure_cmd_t cmd = command_poll_tick(); // may block up to its HTTP timeout
-            apply_command(cmd, esp_timer_get_time());
-            close_expired_windows(esp_timer_get_time());
-        }
-
-        // Modem-sleep (ESP-IDF's default for STA) wakes the radio every
-        // beacon interval, ~102 ms - those periodic current pulses land at
-        // ~10 Hz, right inside the ECG band where no filter can remove them.
-        // Keep the radio fully awake while ECG is recording, doze otherwise.
-        if (s_ecg_active == wifi_ps_on) {
-            wifi_ps_on = !s_ecg_active;
-            wifi_connect_set_power_save(wifi_ps_on);
-        }
+        close_expired_windows(esp_timer_get_time()); // also forced windows during the lockout
+        update_power_state(&wifi_ps_on, &power_measuring);
+        update_usb_power();
 
         int n = 0;
         int32_t v;
@@ -380,10 +702,6 @@ static void sender_loop(void)
             ecg_batch[n++] = v;
         }
 
-        // Report the running average over the whole measurement window so
-        // far, not a single noisy instantaneous sample - each tick folds
-        // one more reading into s_temp_sum/s_hr_sum/s_spo2_sum (reset to
-        // empty in apply_command() when the window opened).
         telemetry_t t = {
             .ecg = ecg_batch,
             .ecg_count = n,
@@ -393,23 +711,57 @@ static void sender_loop(void)
             .temp_remaining_s = -1,
             .lod_mask = -1,
             .adc_sps = -1,
+            .sd_files = sd_logger_pending_files(),
         };
 
-        if (s_temp_active) {
-            float temp_sample;
-            if (tmp117_read_celsius(&temp_sample) == ESP_OK) {
-                s_temp_sum += temp_sample;
-                s_temp_count++;
-            }
-            if (s_temp_count > 0) {
-                t.temp_c = (float)(s_temp_sum / s_temp_count);
-                t.temp_ok = true;
+        // Room temperature while nobody is measuring temperature.
+        static int s_room_tick;
+        if (!s_temp_active && ++s_room_tick >= ROOM_SAMPLE_S) {
+            s_room_tick = 0;
+            float room;
+            if (tmp117_read_celsius(&room) == ESP_OK) {
+                s_room_c = (isnan(s_room_c) || room < s_room_c) ? room : fminf(room, s_room_c + ROOM_RISE_C);
             }
         }
 
+        float temp_sample = NAN;
+        if (s_temp_active) {
+            if (tmp117_read_celsius(&temp_sample) == ESP_OK) {
+                if (s_temp_n == TEMP_MAX_SAMPLES) { // window extended past the buffer: drop the oldest
+                    memmove(s_temp_samples, s_temp_samples + 1, (TEMP_MAX_SAMPLES - 1) * sizeof(float));
+                    s_temp_n--;
+                }
+                s_temp_samples[s_temp_n++] = temp_sample;
+            } else {
+                temp_sample = NAN;
+            }
+        }
+        if (s_temp_result_pending) {
+            s_temp_result_pending = false;
+            float skin;
+            int settled_after_s;
+            if (temp_window_result(&skin, &settled_after_s)) {
+                t.temp_c = skin;
+                t.temp_ok = true;
+                t.temp_body_c = NAN;
+                // Body-temperature estimate (see Kconfig MIOT_TEMP_TISSUE_K_X100):
+                // the core is warmer than the skin in proportion to how much
+                // heat the finger loses to the room.
+                if (!isnan(s_window_room_c)) {
+                    float k = CONFIG_MIOT_TEMP_TISSUE_K_X100 / 100.0f;
+                    float rise = k * (skin - s_window_room_c);
+                    rise = rise < 0 ? 0 : rise > 5.0f ? 5.0f : rise;
+                    t.temp_body_c = skin + rise;
+                    t.temp_room_c = s_window_room_c;
+                }
+                ESP_LOGI(TAG, "temperature: skin %.2f C (settled after %d of %d s), room %.2f C -> body ~%.2f C",
+                         skin, settled_after_s, s_temp_n, s_window_room_c, t.temp_body_c);
+            }
+        }
+
+        int hr_sample = 0, spo2_sample = 0;
+        bool sample_ok = false;
         if (s_vitals_active && s_vitals_running) {
-            int hr_sample, spo2_sample;
-            bool sample_ok = false;
             max30102_estimate_vitals(&hr_sample, &spo2_sample, &sample_ok);
             if (sample_ok) {
                 s_hr_sum += hr_sample;
@@ -418,18 +770,23 @@ static void sender_loop(void)
                 s_spo2_count++;
             }
         }
-        if (s_vitals_active && s_hr_count > 0) {
-            t.hr = (int)lround(s_hr_sum / s_hr_count);
-            t.spo2 = (int)lround(s_spo2_sum / s_spo2_count);
-            t.vitals_ok = true;
+        if (s_vitals_result_pending) {
+            s_vitals_result_pending = false;
+            if (s_hr_count > 0) {
+                t.hr = (int)lround(s_hr_sum / s_hr_count);
+                t.spo2 = (int)lround(s_spo2_sum / s_spo2_count);
+                t.vitals_ok = true;
+                ESP_LOGI(TAG, "pulse %d bpm, SpO2 %d %% (mean of %d valid seconds)", t.hr, t.spo2, s_hr_count);
+            } else {
+                ESP_LOGW(TAG, "no valid pulse/SpO2 reading in the whole window (finger on the sensor?)");
+            }
         }
 
         int64_t now_us = esp_timer_get_time();
+        bool any_window = s_ecg_active || s_vitals_active || s_temp_active;
+        t.status = any_window ? "measuring" : boot_lockout ? "boot_lockout" : "idle";
         if (boot_lockout) {
-            t.status = "boot_lockout";
             t.lockout_remaining_s = remaining_s(BOOT_LOCKOUT_S * US_PER_S, now_us);
-        } else {
-            t.status = (s_ecg_active || s_vitals_active || s_temp_active) ? "measuring" : "idle";
         }
         if (s_ecg_active) {
             t.ecg_remaining_s = remaining_s(s_ecg_deadline_us, now_us);
@@ -443,6 +800,17 @@ static void sender_loop(void)
             t.temp_remaining_s = remaining_s(s_temp_deadline_us, now_us);
         }
 
+#ifdef CONFIG_MIOT_CALIBRATION_MODE
+        {
+            max30102_debug_t d;
+            max30102_get_debug(&d);
+            // Plain printf, one line per second - easy to capture and parse.
+            printf("CAL,%lld,%.3f,%.0f,%.1f,%.0f,%.1f,%.4f,%.1f,%.2f,%d,%d,%d,%d,%d,%d\n", (long long)(now_us / US_PER_S),
+                   temp_sample, d.ir_dc, d.ir_ac, d.red_dc, d.red_ac, d.ratio, d.hr, d.quality,
+                   sample_ok ? spo2_sample : 0, d.finger, d.pulse_ok, s_lod_mask, s_adc_sps, s_adc_dups);
+        }
+#endif
+
         // Up to 11 chars + comma per sample (worst-case int32 after a
         // saturating step, e.g. an electrode coming off) plus fixed fields.
         size_t cap = (size_t)n * 12 + 512;
@@ -452,10 +820,26 @@ static void sender_loop(void)
             continue;
         }
         size_t len = build_telemetry_json(json, cap, &t);
+        measure_cmd_t cmds = MEASURE_NONE;
+
+        bool measuring_now = s_ecg_active || s_vitals_active || s_temp_active;
+        if (measuring_now && !in_session) {
+            offline_log_session_start(boot_id());
+        }
+        // Session = from the first measuring second through the line that
+        // reports the last window closed.
+        bool log_this_line = measuring_now || in_session;
+        in_session = measuring_now;
+
+        bool delivered = false;
         if (len == 0) {
             ESP_LOGE(TAG, "telemetry JSON didn't fit in %u bytes, batch dropped", (unsigned)cap);
         } else if (wifi_connect_is_up()) {
-            if (telemetry_http_post(json, len) != ESP_OK) {
+            // The response also carries any queued button presses - one
+            // request per second covers both telemetry and command polling.
+            if (telemetry_http_post(json, len, &cmds) == ESP_OK) {
+                delivered = true;
+            } else {
                 ESP_LOGW(TAG, "telemetry POST failed");
             }
             if (telemetry_mqtt_publish(json, len) != ESP_OK) {
@@ -468,13 +852,51 @@ static void sender_loop(void)
         } else {
             ESP_LOGW(TAG, "Wi-Fi down, skipping POST (ecg_samples=%d)", n);
         }
-
+        // Measurement data the server didn't get is kept for the SD card.
+        if (log_this_line && !delivered && len > 0) {
+            offline_log_append(json, len);
+        }
         free(json);
+
+        // Copy buffered data to the SD card once nothing is measuring (the
+        // card can't be written while the ADS1293 converts). Two idle ticks
+        // first, so ecg_task has surely put the ADS1293 back in standby.
+        idle_ticks = measuring_now ? 0 : idle_ticks + 1;
+        if (idle_ticks >= 2 && offline_log_has_data() && esp_timer_get_time() >= next_copy_try_us) {
+            if (!offline_log_copy_to_sd()) {
+                next_copy_try_us = esp_timer_get_time() + 30 * US_PER_S;
+            }
+        }
+
+        // "Завантажити дані з SD": only while idle (the card can't be used
+        // while the ADS1293 converts), and only after anything still in the
+        // flash buffer has been moved onto the card.
+        if (cmds & CMD_SD_UPLOAD) {
+            cmds &= ~CMD_SD_UPLOAD;
+            if (measuring_now || offline_log_has_data()) {
+                ESP_LOGW(TAG, "SD upload requested while measuring / still copying - ignored, press again later");
+            } else {
+                ESP_LOGI(TAG, "uploading the SD card to the server");
+                sd_upload_all(boot_id());
+            }
+        }
+        if (cmds & MEASURE_ALL) {
+            if (boot_lockout && !(cmds & CMD_FORCE)) {
+                ESP_LOGW(TAG, "measurement requested during the warm-up lockout - ignored");
+            } else {
+                apply_command(cmds, esp_timer_get_time());
+                update_power_state(&wifi_ps_on, &power_measuring);
+            }
+        }
     }
 }
 
 void app_main(void)
 {
+    // Why did we (re)start? Printed again every 10 s from the send loop, so
+    // it can still be read after attaching to the serial port late.
+    ESP_LOGW(TAG, "reset reason: %s", reset_reason_str(esp_reset_reason()));
+
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -482,15 +904,24 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
+    power_init();
     s_ecg_queue = xQueueCreate(ECG_QUEUE_LEN, sizeof(int32_t));
 
     // Wi-Fi: block here until connected or the quick retries run out -
     // after that wifi_connect keeps retrying every 10 s in the background,
     // and POSTs are just skipped while it's down.
-#if !WIFI_DISABLED_FOR_TEST
+#if !WIFI_DISABLED_FOR_TEST && !defined(CONFIG_MIOT_CALIBRATION_MODE)
     if (wifi_connect_start() != ESP_OK) {
         ESP_LOGW(TAG, "starting without Wi-Fi; will keep retrying in background");
     }
+#ifndef CONFIG_MIOT_AZURE_ENABLE
+    // Wall-clock time (no RTC on the board): synced in the background
+    // whenever there's internet, so data measured offline later can be
+    // stamped with real time on the SD card. (The Azure module runs its own
+    // SNTP when enabled.)
+    esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_netif_sntp_init(&sntp_cfg);
+#endif
 #else
     ESP_LOGW(TAG, "Wi-Fi intentionally disabled for noise-source test - no network, watch serial log");
 #endif
@@ -507,19 +938,32 @@ void app_main(void)
     i2c_master_bus_handle_t i2c_bus;
     ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus));
 
-    // SPI bus for the ADS1293 (SD card logging left out for now - this build
-    // only cares about getting sensor data to the server).
+    // SPI bus shared by the SD card and the ADS1293 (separate MISO lines,
+    // see pins.h). Pins go through the GPIO matrix (never the IO_MUX fast
+    // path), which the ADS1293 driver's per-transaction MISO switch needs.
     spi_bus_config_t spi_bus_cfg = {
         .mosi_io_num = PIN_SPI_MOSI,
-        .miso_io_num = PIN_SPI_MISO,
+        .miso_io_num = PIN_SD_MISO,
         .sclk_io_num = PIN_SPI_SCK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
         .max_transfer_sz = 4096,
+        .flags = SPICOMMON_BUSFLAG_MASTER | SPICOMMON_BUSFLAG_GPIO_PINS,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI_HOST_ID, &spi_bus_cfg, SPI_DMA_CH_AUTO));
+    gpio_pullup_en(PIN_SD_MISO); // SD spec: pull-ups on the data lines
 
-    ESP_ERROR_CHECK(ads1293_init(SPI_HOST_ID, PIN_ADS1293_CS));
+    // Order matters: ADS1293 first, then the SD card. Mounting the card and
+    // only then adding the ADS1293 to the bus left the card unresponsive
+    // (every later SD command timed out until a re-mount), while the other
+    // way round both work side by side, ECG conversions included. The
+    // card's CS is driven high before any ADS1293 traffic so it never
+    // listens in.
+    gpio_set_level(PIN_SD_CS, 1);
+    gpio_set_direction(PIN_SD_CS, GPIO_MODE_OUTPUT);
+    ESP_ERROR_CHECK(ads1293_init(SPI_HOST_ID, PIN_ADS1293_CS, PIN_ADS1293_MISO, PIN_SD_MISO));
+    sd_logger_init(SPI_HOST_ID, PIN_SD_CS);
+    offline_log_init();
     tmp117_init(i2c_bus);
     max30102_init(i2c_bus);
 
@@ -538,9 +982,17 @@ void app_main(void)
     s_ecg_deadline_us = INT64_MAX;
     s_ecg_active = true;
 #endif
+#ifdef CONFIG_MIOT_CALIBRATION_MODE
+    ESP_LOGW(TAG, "CALIBRATION MODE: all sensors always on, raw values on serial");
+    s_ecg_deadline_us = s_vitals_deadline_us = s_temp_deadline_us = INT64_MAX;
+    s_ecg_active = s_vitals_active = s_temp_active = true;
+#endif
 
     xTaskCreate(ecg_task, "ecg_task", 4096, NULL, 10, NULL);
     xTaskCreate(ppg_task, "ppg_task", 4096, NULL, 5, NULL);
+
+    s_sender_task = xTaskGetCurrentTaskHandle();
+    button_init();
 
     ESP_LOGI(TAG, "init done, entering send loop (sensors off until a measurement is requested)");
     sender_loop(); // never returns
