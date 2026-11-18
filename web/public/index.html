@@ -13,14 +13,20 @@
   </header>
 
   <main>
-    <div id="banner" class="banner" hidden></div>
+    <div id="banner" class="banner" hidden>
+      <span id="banner-text"></span>
+      <button id="btn-force" class="force-btn" data-type="all_force">Виміряти все одно</button>
+    </div>
 
     <section class="controls">
       <button id="btn-ecg" class="measure-btn" data-type="ecg">Виміряти ЕКГ</button>
       <button id="btn-vitals" class="measure-btn" data-type="vitals">Виміряти пульс/SpO₂</button>
       <button id="btn-temp" class="measure-btn" data-type="temp">Виміряти температуру</button>
       <button id="btn-all" class="measure-btn all" data-type="all">Виміряти все</button>
+      <button id="btn-sd" class="sd-btn" disabled title="Вимірювання, які пристрій записав на SD-картку без інтернету">Завантажити дані з SD</button>
     </section>
+
+    <div id="notice" class="notice" hidden></div>
 
     <section class="tiles">
       <div class="tile" id="tile-hr">
@@ -45,6 +51,41 @@
       <div id="ecg-lod" class="lod-warn" hidden></div>
       <canvas id="ecg"></canvas>
       <div class="measured-at" id="ecg-age"></div>
+    </section>
+
+    <section class="panel">
+      <div class="records-head">
+        <h2>Збережені записи</h2>
+        <div class="records-controls">
+          <button id="btn-save" class="action-btn primary">Зберегти вимірювання</button>
+          <label class="check"><input type="checkbox" id="autosave"> Автозбереження</label>
+          <label class="retention">Зберігати
+            <select id="retention">
+              <option value="1">1 день</option>
+              <option value="7">1 тиждень</option>
+              <option value="14">2 тижні</option>
+              <option value="30">1 місяць</option>
+              <option value="90">3 місяці</option>
+              <option value="180">6 місяців</option>
+              <option value="365">1 рік</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div id="save-status" class="save-status"></div>
+      <p id="records-empty" class="muted">Ще немає збережених записів.</p>
+      <ul id="records" class="records"></ul>
+    </section>
+
+    <section class="panel" id="viewer" hidden>
+      <div class="records-head">
+        <h2 id="viewer-title">Запис</h2>
+        <button id="viewer-close" class="action-btn">Закрити</button>
+      </div>
+      <div id="viewer-vitals" class="viewer-vitals"></div>
+      <canvas id="viewer-ecg"></canvas>
+      <input type="range" id="viewer-pos" min="0" value="0" step="1">
+      <div id="viewer-time" class="measured-at"></div>
     </section>
   </main>
 
