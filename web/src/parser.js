@@ -3,7 +3,9 @@ const DEFAULT_FS = 250;
 const RANGES = {
   hr: [20, 300],
   spo2: [50, 100],
-  temp: [25, 45],
+  temp: [10, 45],      // measured fingertip temperature (a cold finger can be well below 30)
+  temp_body: [30, 45], // device's estimate of body temperature
+  temp_room: [-10, 60],
   battery: [0, 100],
 };
 
@@ -44,6 +46,10 @@ function normalize(input, receivedAt = Date.now()) {
   if (hr !== undefined) msg.hr = hr;
   if (spo2 !== undefined) msg.spo2 = spo2;
   if (temp !== undefined) msg.temp = temp;
+  const tempBody = pick('temp_body', input.temp_body);
+  const tempRoom = pick('temp_room', input.temp_room);
+  if (temp !== undefined && tempBody !== undefined) msg.temp_body = tempBody;
+  if (temp !== undefined && tempRoom !== undefined) msg.temp_room = tempRoom;
   if (battery !== undefined) msg.battery = battery;
 
   if (input.ecg !== undefined) {
@@ -60,7 +66,7 @@ function normalize(input, receivedAt = Date.now()) {
   if (typeof input.status === 'string' && input.status) {
     msg.status = input.status.slice(0, 32);
   }
-  for (const key of ['lockout_remaining_s', 'ecg_remaining_s', 'vitals_remaining_s', 'temp_remaining_s', 'lod', 'adc_sps']) {
+  for (const key of ['lockout_remaining_s', 'ecg_remaining_s', 'vitals_remaining_s', 'temp_remaining_s', 'lod', 'adc_sps', 'sd_files']) {
     const v = num(input[key]);
     if (v !== undefined) msg[key] = v;
   }

@@ -59,8 +59,15 @@ function ingest(raw, source) {
   latest.set(msg.device_id, merged);
 
   broadcast({ type: 'data', data: msg });
+  for (const fn of listeners) {
+    try { fn(msg); } catch (e) { console.error('[hub] listener failed:', e.message); }
+  }
   return res;
 }
+
+// Extra consumers of every accepted message (e.g. history recording).
+const listeners = [];
+function addListener(fn) { listeners.push(fn); }
 
 function addClient(ws) {
   clients.add(ws);
@@ -76,4 +83,4 @@ function getStats() {
   return { ...stats, clients: clients.size, devices: latest.size };
 }
 
-module.exports = { ingest, addClient, getLatest, getStats };
+module.exports = { ingest, addClient, getLatest, getStats, addListener, broadcast };
