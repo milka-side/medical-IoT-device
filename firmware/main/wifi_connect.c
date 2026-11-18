@@ -31,6 +31,7 @@ static esp_timer_handle_t s_reconnect_timer;
 // device offline until someone power-cycles it (which would also restart
 // the 10-minute boot lockout and kill any measurement in progress).
 #define WIFI_RETRY_BACKOFF_US (10LL * 1000 * 1000)
+#define WIFI_START_WAIT_MS    15000
 
 static void reconnect_timer_cb(void *arg)
 {
@@ -106,12 +107,19 @@ esp_err_t wifi_connect_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
+    // Cap TX power (units of 0.25 dBm: 60 = 15 dBm, default is ~20 dBm).
+    // Lower transmit current peaks - the board was resetting / dropping off
+    // USB, which looks like the supply sagging during Wi-Fi bursts.
+    esp_wifi_set_max_tx_power(60);
     s_started = true;
 
     ESP_LOGI(TAG, "connecting to SSID '%s'...", CONFIG_MIOT_WIFI_SSID);
 
+    // Bounded: an AP that associates but never hands out an address (DHCP)
+    // must not stall the whole boot - the sensors and the SD card log work
+    // offline too. A late IP still arrives via the GOT_IP event.
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,
-                                            portMAX_DELAY);
+                                            pdMS_TO_TICKS(WIFI_START_WAIT_MS));
 
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "connected");
@@ -122,6 +130,11 @@ esp_err_t wifi_connect_start(void)
         return ESP_OK;
     }
 
+    if (!(bits & WIFI_FAIL_BIT)) {
+        ESP_LOGW(TAG, "no IP from '%s' after %d s - continuing, still trying", CONFIG_MIOT_WIFI_SSID,
+                 WIFI_START_WAIT_MS / 1000);
+        return ESP_ERR_TIMEOUT;
+    }
     ESP_LOGE(TAG, "failed to connect to SSID '%s'", CONFIG_MIOT_WIFI_SSID);
     return ESP_FAIL;
 }
