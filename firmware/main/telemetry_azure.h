@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "device_commands.h"
 #include "esp_err.h"
 
 // Azure IoT Hub telemetry over MQTT (mqtts://<hub>.azure-devices.net:8883).
@@ -31,3 +32,11 @@ esp_err_t telemetry_azure_init(void);
 // only 8000 messages/day and the main loop ticks once a second.
 // Best-effort: silently dropped while not connected.
 esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle);
+
+// Dashboard commands over Azure IoT Hub direct methods: the server calls
+// method "command" with payload {"commands":["all"]} (same format as the
+// /api/data response). The handler runs on the MQTT client's task, must be
+// quick, and decides right away: it returns the status sent back to the
+// server (200 = accepted, 4xx = refused) and may write a short reason.
+typedef int (*azure_command_handler_t)(measure_cmd_t cmds, char *reason, size_t reason_cap);
+void telemetry_azure_set_command_handler(azure_command_handler_t handler);

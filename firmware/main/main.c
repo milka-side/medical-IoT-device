@@ -632,6 +632,41 @@ static bool button_rearm_pending(void)
     return false;
 }
 
+// Commands that arrived over Azure IoT Hub direct methods (MQTT task),
+// picked up by the sender loop on its next tick like the HTTP ones.
+static portMUX_TYPE s_remote_lock = portMUX_INITIALIZER_UNLOCKED;
+static measure_cmd_t s_remote_cmds;
+
+// Runs on the Azure MQTT task: decide at once so the dashboard learns
+// whether the command will be carried out, then queue it.
+static int on_azure_command(measure_cmd_t cmds, char *reason, size_t cap)
+{
+    bool lockout = esp_timer_get_time() < BOOT_LOCKOUT_S * US_PER_S;
+    bool measuring = s_ecg_active || s_vitals_active || s_temp_active;
+    if ((cmds & MEASURE_ALL) && lockout && !(cmds & CMD_FORCE)) {
+        snprintf(reason, cap, "warmup"); // web/src/azure-commands.js REASONS
+        return 409;
+    }
+    if ((cmds & CMD_SD_UPLOAD) && !(cmds & MEASURE_ALL) && measuring) {
+        snprintf(reason, cap, "measuring");
+        return 409;
+    }
+    portENTER_CRITICAL(&s_remote_lock);
+    s_remote_cmds |= cmds;
+    portEXIT_CRITICAL(&s_remote_lock);
+    snprintf(reason, cap, "ok");
+    return 200;
+}
+
+static measure_cmd_t take_remote_commands(void)
+{
+    portENTER_CRITICAL(&s_remote_lock);
+    measure_cmd_t c = s_remote_cmds;
+    s_remote_cmds = MEASURE_NONE;
+    portEXIT_CRITICAL(&s_remote_lock);
+    return c;
+}
+
 static void sender_loop(void)
 {
     int32_t *ecg_batch = malloc(ECG_DRAIN_MAX * sizeof(int32_t));
@@ -868,6 +903,8 @@ static void sender_loop(void)
             }
         }
 
+        cmds |= take_remote_commands();
+
         // "Завантажити дані з SD": only while idle (the card can't be used
         // while the ADS1293 converts), and only after anything still in the
         // flash buffer has been moved onto the card.
@@ -970,6 +1007,7 @@ void app_main(void)
     if (telemetry_mqtt_init() != ESP_OK) {
         ESP_LOGW(TAG, "MQTT telemetry init failed; continuing with HTTP only");
     }
+    telemetry_azure_set_command_handler(on_azure_command);
     if (telemetry_azure_init() != ESP_OK) {
         ESP_LOGW(TAG, "Azure IoT Hub telemetry init failed; continuing without it");
     }

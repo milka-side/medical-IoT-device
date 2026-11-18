@@ -37,6 +37,63 @@ static char s_topic[192];
 
 static esp_mqtt_client_handle_t s_client;
 static volatile bool s_connected;
+static azure_command_handler_t s_command_handler;
+
+// Direct methods: IoT Hub delivers calls on $iothub/methods/POST/<name>/?$rid=<id>
+// and expects the reply on $iothub/methods/res/<status>/?$rid=<id>.
+#define METHODS_TOPIC     "$iothub/methods/POST/#"
+#define METHODS_PREFIX    "$iothub/methods/POST/"
+
+static void reply_method(const char *rid, int status, const char *json)
+{
+    char topic[96];
+    snprintf(topic, sizeof(topic), "$iothub/methods/res/%d/?$rid=%s", status, rid);
+    esp_mqtt_client_publish(s_client, topic, json, (int)strlen(json), /*qos=*/0, /*retain=*/0);
+}
+
+static void handle_method(const char *topic, int topic_len, const char *data, int data_len)
+{
+    // "$iothub/methods/POST/command/?$rid=1"
+    char t[128];
+    if (topic_len >= (int)sizeof(t)) {
+        return;
+    }
+    memcpy(t, topic, topic_len);
+    t[topic_len] = '\0';
+    const char *name = t + strlen(METHODS_PREFIX);
+    const char *slash = strchr(name, '/');
+    const char *rid = strstr(t, "$rid=");
+    if (slash == NULL || rid == NULL) {
+        return;
+    }
+    rid += 5;
+    int name_len = (int)(slash - name);
+
+    if (name_len != 7 || strncmp(name, "command", 7) != 0) {
+        reply_method(rid, 404, "{\"error\":\"unknown method\"}");
+        return;
+    }
+    char body[160];
+    int n = data_len < (int)sizeof(body) - 1 ? data_len : (int)sizeof(body) - 1;
+    memcpy(body, data, n);
+    body[n] = '\0';
+    measure_cmd_t cmds = device_commands_parse(body);
+    if (cmds == MEASURE_NONE) {
+        reply_method(rid, 400, "{\"error\":\"no known command in payload\"}");
+        return;
+    }
+    char reason[96] = "";
+    int status = s_command_handler ? s_command_handler(cmds, reason, sizeof(reason)) : 503;
+    char json[160];
+    snprintf(json, sizeof(json), "{\"accepted\":%s,\"reason\":\"%s\"}", status == 200 ? "true" : "false", reason);
+    reply_method(rid, status, json);
+    ESP_LOGI(TAG, "direct method command (0x%x) -> %d %s", (unsigned)cmds, status, reason);
+}
+
+void telemetry_azure_set_command_handler(azure_command_handler_t handler)
+{
+    s_command_handler = handler;
+}
 static int64_t s_last_idle_us = INT64_MIN / 2;
 
 // "HostName=x.azure-devices.net;DeviceId=y;SharedAccessKey=z" -> fields.
@@ -155,7 +212,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
         s_connected = true;
-        ESP_LOGI(TAG, "connected to Azure IoT Hub %s as %s", s_host, s_device_id);
+        esp_mqtt_client_subscribe(s_client, METHODS_TOPIC, 0);
+        ESP_LOGI(TAG, "connected to Azure IoT Hub %s as %s, listening for direct methods", s_host, s_device_id);
+        break;
+    case MQTT_EVENT_DATA:
+        // Method calls are tiny - a fragmented (multi-part) one is ignored.
+        if (event->current_data_offset == 0 && event->data_len == event->total_data_len && event->topic_len > 0 &&
+            strncmp(event->topic, METHODS_PREFIX, strlen(METHODS_PREFIX)) == 0) {
+            handle_method(event->topic, event->topic_len, event->data, event->data_len);
+        }
         break;
     case MQTT_EVENT_DISCONNECTED:
         s_connected = false;
@@ -288,6 +353,11 @@ esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle)
     (void)len;
     (void)idle;
     return ESP_OK;
+}
+
+void telemetry_azure_set_command_handler(azure_command_handler_t handler)
+{
+    (void)handler;
 }
 
 #endif
