@@ -1,3 +1,6 @@
+// @azure/event-hubs calls globalThis.crypto.randomUUID(), which Node only
+// provides globally from v19 - on Node 18 the server crashed at startup.
+if (!globalThis.crypto) globalThis.crypto = require('crypto').webcrypto;
 const { EventHubConsumerClient } = require('@azure/event-hubs');
 
 function startAzureIngest(hub) {
