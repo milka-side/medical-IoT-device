@@ -20,11 +20,27 @@ esp_err_t max30102_stop(void);
 // (e.g. every 20-50 ms) from the sampling loop.
 esp_err_t max30102_poll(void);
 
-// Computes HR from actual inter-beat (RR) intervals, smoothed with an EMA,
-// and SpO2 from a ratio-of-ratios estimate over the most recent ~1 s of
-// buffered samples. This is a lightweight, uncalibrated approximation (not
-// the proprietary Maxim algorithm) - good enough for a student demo, not
-// for medical use. Returns false via *out_valid when there isn't enough
-// signal or no beat has been detected recently (e.g. no finger on the
-// sensor).
+// Pulse rate (autocorrelation of the band-passed IR signal) and SpO2
+// (ratio-of-ratios of RMS pulsatile amplitudes, linear curve from
+// menuconfig) over the last 8 s. Not a medical device. *out_valid is false
+// when there is no finger, the finger is moving, or the pulse isn't clear
+// enough to trust - nothing is reported rather than a noisy guess.
 esp_err_t max30102_estimate_vitals(int *out_hr_bpm, int *out_spo2_pct, bool *out_valid);
+
+// Sets the LED1/LED2 pulse amplitudes (MAX30102 register units, ~0.2 mA per
+// LSB). Used by calibration mode to light one LED at a time.
+esp_err_t max30102_set_led_currents(uint8_t led1_pa, uint8_t led2_pa);
+
+// Raw quantities behind the last max30102_estimate_vitals() call, for
+// calibration logging. ir_ac/red_ac are RMS pulsatile amplitudes, ratio
+// is the SpO2 ratio-of-ratios R (0 if unknown).
+typedef struct {
+    double ir_dc, ir_ac, red_dc, red_ac;
+    double ratio;
+    double hr;      // autocorrelation estimate, even if not trusted
+    double quality; // normalised autocorrelation peak, 0..1
+    bool finger;    // IR DC level high enough to mean a finger is on the sensor
+    bool pulse_ok;  // finger + clear periodic pulse: hr/SpO2 are reported
+} max30102_debug_t;
+
+void max30102_get_debug(max30102_debug_t *out);
