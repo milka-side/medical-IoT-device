@@ -4,6 +4,8 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_rom_gpio.h"
+#include "soc/spi_periph.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -63,6 +65,27 @@ static const char *TAG = "ads1293";
 
 static spi_device_handle_t s_spi;
 static SemaphoreHandle_t s_drdy_sem;
+
+// The SD module keeps driving its MISO line even while deselected, so the
+// ADS1293's SDO has its own pin. The bus is initialised with the SD card's
+// MISO; for the duration of each ADS1293 transaction the bus's MISO input
+// is re-routed (GPIO matrix) to the ADS1293 pin and then handed back. The
+// SPI driver holds the bus lock across pre_cb..post_cb, so the SD card's
+// transactions never see the swapped input. Plain variables (DRAM), as the
+// callbacks run from the SPI ISR.
+static int s_miso_gpio = -1;
+static int s_bus_miso_gpio = -1;
+static uint32_t s_spiq_in_signal;
+
+static void IRAM_ATTR spi_pre_cb(spi_transaction_t *t)
+{
+    esp_rom_gpio_connect_in_signal(s_miso_gpio, s_spiq_in_signal, false);
+}
+
+static void IRAM_ATTR spi_post_cb(spi_transaction_t *t)
+{
+    esp_rom_gpio_connect_in_signal(s_bus_miso_gpio, s_spiq_in_signal, false);
+}
 
 static void IRAM_ATTR drdy_isr_handler(void *arg)
 {
@@ -181,7 +204,7 @@ static void ads1293_spi_diagnostic_sweep(spi_host_device_t host, int cs_gpio)
 }
 #endif
 
-esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio)
+esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio, int miso_gpio, int bus_miso_gpio)
 {
 #if ADS1293_RUN_SPI_DIAG_SWEEP
     ads1293_spi_diagnostic_sweep(host, cs_gpio);
@@ -193,6 +216,19 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio)
         .spics_io_num = cs_gpio,
         .queue_size = 4,
     };
+    if (miso_gpio >= 0 && miso_gpio != bus_miso_gpio) {
+        gpio_config_t miso_conf = {
+            .pin_bit_mask = 1ULL << miso_gpio,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE, // SDO is high-Z while CSB is high
+        };
+        gpio_config(&miso_conf);
+        s_miso_gpio = miso_gpio;
+        s_bus_miso_gpio = bus_miso_gpio;
+        s_spiq_in_signal = spi_periph_signal[host].spiq_in;
+        devcfg.pre_cb = spi_pre_cb;
+        devcfg.post_cb = spi_post_cb;
+    }
     esp_err_t err = spi_bus_add_device(host, &devcfg, &s_spi);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_add_device failed: %s", esp_err_to_name(err));
@@ -308,6 +344,20 @@ static bool s_baseline_init = false;
 static double s_notch_x1, s_notch_x2, s_notch_y1, s_notch_y2;
 static double s_lowpass;
 
+// Reads that returned exactly the previous 24-bit code. With real noise two
+// consecutive conversions are practically never identical, so a high count
+// means DRDY fired without a new conversion (spurious edges) and the same
+// sample was read twice.
+static uint32_t s_last_raw;
+static uint32_t s_dup_count;
+
+uint32_t ads1293_take_duplicate_count(void)
+{
+    uint32_t n = s_dup_count;
+    s_dup_count = 0;
+    return n;
+}
+
 esp_err_t ads1293_start_conversion(void)
 {
     // Drain any stale DRDY signal left over from before conversions were
@@ -348,6 +398,15 @@ esp_err_t ads1293_read_sample(int32_t *out_sample, uint32_t timeout_ms)
     reg_read_burst(REG_DATA_CH1_ECG, bytes, sizeof(bytes));
 
     uint32_t raw = ((uint32_t)bytes[0] << 16) | ((uint32_t)bytes[1] << 8) | bytes[2];
+    if (raw == s_last_raw) {
+        // Measured on the real board: ~30% of DRDY interrupts were spurious
+        // and re-read the previous conversion, so 800 sps arrived as ~1150
+        // and the trace was stretched in time. Drop the repeat instead of
+        // feeding it into the filters as if it were a new sample.
+        s_dup_count++;
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_last_raw = raw;
 
     if (!s_baseline_init) {
         s_baseline = (double)raw;
