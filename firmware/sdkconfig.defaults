@@ -55,3 +55,13 @@ CONFIG_MIOT_SERVER_URL="http://10.10.245.218:3000"
 # microSD logging (sd_logger.c): long file names (meas_00001.jsonl),
 # name buffer on the heap rather than the task stack.
 CONFIG_FATFS_LFN_HEAP=y
+
+# Azure telemetry with QoS 1 (telemetry_azure.c, main.c pending_*): the MQTT
+# client retries an unacknowledged message for 10 s, then drops it and
+# reports MQTT_EVENT_DELETED - only then does the firmware keep a copy for
+# the SD card, so a message never reaches both the dashboard and the card.
+# Incremental message ids so an id can't repeat within that window.
+CONFIG_MQTT_USE_CUSTOM_CONFIG=y
+CONFIG_MQTT_OUTBOX_EXPIRED_TIMEOUT_MS=10000
+CONFIG_MQTT_REPORT_DELETED_MESSAGES=y
+CONFIG_MQTT_MSG_ID_INCREMENTAL=y
