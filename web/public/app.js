@@ -9,12 +9,13 @@ const ALARMS = {
   temp: (v) => v < 35 || v > 37.8, // applied to the estimated body temperature
 };
 
-// While idle the device sends one status a minute through Azure (F1 quota),
-// during a measurement one message a second - so silence means "gone"
-// after 90 s when idle but after a few seconds mid-measurement.
+// Through Azure the device sends one message a second only while ECG is
+// recording; otherwise one status a minute (F1 quota) plus an immediate one
+// on every change. So silence means "gone" after a few seconds during ECG,
+// but only after 90 s otherwise.
 const STALE_MS = 90 * 1000;
-const STALE_MEASURING_MS = 5000;
-let lastStatus = '';
+const STALE_ECG_MS = 5000;
+let lastEcgActive = false;
 
 const MEASURE_LABELS = {
   ecg: 'Виміряти ЕКГ',
@@ -244,10 +245,10 @@ function drawEcg() {
 
 const conn = $('conn');
 
-function noteData(receivedAt, status) {
+function noteData(receivedAt, ecgActive) {
   if (receivedAt && receivedAt > lastDataAt) {
     lastDataAt = receivedAt;
-    if (status) lastStatus = status;
+    lastEcgActive = ecgActive;
   }
 }
 
@@ -257,7 +258,7 @@ function updateConnBadge() {
     conn.className = 'conn off';
     return;
   }
-  const stale = lastStatus === 'measuring' ? STALE_MEASURING_MS : STALE_MS;
+  const stale = lastEcgActive ? STALE_ECG_MS : STALE_MS;
   if (lastDataAt && Date.now() - lastDataAt > stale) {
     const sec = Math.round((Date.now() - lastDataAt) / 1000);
     conn.textContent = `немає даних (${sec < 120 ? `${sec} с` : `${Math.round(sec / 60)} хв`})`;
@@ -312,13 +313,31 @@ sdBtn.addEventListener('click', async () => {
   }
 });
 
+// Countdowns (warm-up, measurement windows) run on locally between messages:
+// outside ECG the device reports only once a minute, and immediately when a
+// window opens or closes.
+const COUNTDOWN_KEYS = ['lockout_remaining_s', 'ecg_remaining_s', 'vitals_remaining_s', 'temp_remaining_s'];
+let lastControls = null;
+
+function tickCountdowns() {
+  if (!lastControls) return;
+  const elapsed = Math.floor((Date.now() - lastControls.at) / 1000);
+  if (elapsed <= 0) return;
+  const d = { ...lastControls.d };
+  for (const k of COUNTDOWN_KEYS) {
+    if (typeof d[k] === 'number') d[k] = Math.max(0, d[k] - elapsed);
+  }
+  updateControls(d);
+}
+
 function handleDeviceMessage(d) {
   if (d.device_id) deviceId = d.device_id;
   showVitals(d);
+  lastControls = { d, at: Date.now() };
   updateControls(d);
   updateSdButton(d);
   showLeadOff(d);
-  noteData(d.received_at, d.status);
+  noteData(d.received_at, d.ecg_remaining_s !== undefined);
 }
 
 function connect() {
@@ -617,7 +636,7 @@ window.addEventListener('resize', drawViewer);
 loadHistory();
 connect();
 setInterval(updateConnBadge, 1000);
-setInterval(refreshAges, 1000); // keeps "X тому" live between messages, not just on arrival
+setInterval(() => { tickCountdowns(); refreshAges(); }, 1000); // countdowns and "X тому" stay live between messages
 (function loop() {
   drawEcg();
   requestAnimationFrame(loop);
