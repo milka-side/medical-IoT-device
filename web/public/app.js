@@ -9,7 +9,13 @@ const ALARMS = {
   temp: (v) => v < 35 || v > 37.8, // applied to the estimated body temperature
 };
 
-const STALE_MS = 5000;
+// The device counts as offline once nothing has arrived for this long. While
+// idle it sends one status message a minute to Azure (MIOT_AZURE_IDLE_PERIOD_S
+// = 60, to stay inside the F1 quota), so anything shorter would flag a
+// healthy idle device. During a measurement it sends every second, so a few
+// seconds of silence already mean it's gone.
+const STALE_MS = 90 * 1000;
+const STALE_MEASURING_MS = 5000;
 
 const MEASURE_LABELS = {
   ecg: 'Виміряти ЕКГ',
@@ -239,23 +245,36 @@ function drawEcg() {
 
 const conn = $('conn');
 
-function noteData(receivedAt) {
-  if (receivedAt && receivedAt > lastDataAt) lastDataAt = receivedAt;
+let lastStatus = '';
+
+function noteData(receivedAt, status) {
+  if (receivedAt && receivedAt > lastDataAt) {
+    lastDataAt = receivedAt;
+    if (status) lastStatus = status;
+  }
 }
 
+// Shows whether the *device* is sending, not just whether this page is
+// connected to the server.
 function updateConnBadge() {
   if (!wsOpen) {
-    conn.textContent = 'не підключено';
+    conn.textContent = 'немає зв\'язку з сервером';
     conn.className = 'conn off';
     return;
   }
-  if (lastDataAt && Date.now() - lastDataAt > STALE_MS) {
-    const sec = Math.round((Date.now() - lastDataAt) / 1000);
-    conn.textContent = `немає даних (${sec}с)`;
-    conn.className = 'conn warn';
+  if (!lastDataAt) {
+    conn.textContent = 'пристрій не на зв\'язку';
+    conn.className = 'conn off';
     return;
   }
-  conn.textContent = 'підключено';
+  const age = Date.now() - lastDataAt;
+  if (age > (lastStatus === 'measuring' ? STALE_MEASURING_MS : STALE_MS)) {
+    const sec = Math.round(age / 1000);
+    conn.textContent = `пристрій не на зв'язку (${sec < 120 ? `${sec} с` : `${Math.round(sec / 60)} хв`} тому)`;
+    conn.className = 'conn off';
+    return;
+  }
+  conn.textContent = 'пристрій на зв\'язку';
   conn.className = 'conn on';
 }
 
@@ -304,7 +323,7 @@ function handleDeviceMessage(d) {
   updateControls(d);
   updateSdButton(d);
   showLeadOff(d);
-  noteData(d.received_at);
+  noteData(d.received_at, d.status);
 }
 
 function connect() {
