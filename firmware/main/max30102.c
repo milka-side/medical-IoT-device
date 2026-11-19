@@ -29,42 +29,37 @@
 #define LED_PA_DEFAULT        0x24 // ~7 mA
 
 #define SAMPLE_RATE_HZ        100
-// Pulse rate and SpO2 come from the last 8 s: long enough for several beats
-// even at 40 bpm, short enough to follow real changes.
+// HR and SpO2 over the last 8 s.
 #define WINDOW_SAMPLES        (SAMPLE_RATE_HZ * 8)
 #define RING_SIZE             1024
 
-// Per-sample band-pass that turns the raw PPG into its pulsatile part:
-// an EMA baseline (~0.5 Hz) removes DC and slow drift, an EMA low-pass
-// (~6 Hz) removes sample noise. alpha = 1 - exp(-2*pi*fc/fs).
+// Band-pass per sample: EMA baseline (~0.5 Hz) out, EMA low-pass (~6 Hz).
 #define BASELINE_ALPHA        0.0309
 #define LOWPASS_ALPHA         0.3
 
-// Autocorrelation search range, in samples (35..180 bpm).
+// Autocorrelation lag range (35..180 bpm).
 #define HR_MIN_BPM            35
 #define HR_MAX_BPM            180
 #define LAG_MIN               (SAMPLE_RATE_HZ * 60 / HR_MAX_BPM)
 #define LAG_MAX               (SAMPLE_RATE_HZ * 60 / HR_MIN_BPM)
 #define N_LAGS                (LAG_MAX - LAG_MIN + 1)
 
-// Normalised autocorrelation needed to trust the window. Measured on a real
-// fingertip recording: a clean pulse gave 0.62-0.81, movement / pressing
-// too hard / a lifted finger stayed below ~0.45.
+// Min. autocorrelation to trust the window. Clean pulse gave 0.62-0.81,
+// movement or a lifted finger stayed below ~0.45.
 #define MIN_PULSE_QUALITY     0.5
 
-// IR DC level below this = nothing on the sensor (ambient floor).
+// IR DC below this = no finger.
 #define FINGER_DC_MIN         20000.0
 
 static const char *TAG = "max30102";
 static i2c_master_dev_handle_t s_dev;
 
-// s_lock protects the rings and filter state: written by max30102_poll()
-// (ppg_task), read by max30102_estimate_vitals() (sender task).
+// Written by max30102_poll() (ppg_task), read by estimate_vitals() (sender).
 static SemaphoreHandle_t s_lock;
 
 static uint32_t s_ir_ring[RING_SIZE];
 static uint32_t s_red_ring[RING_SIZE];
-static int32_t s_ir_ac_ring[RING_SIZE];  // band-passed, pulsatile part only
+static int32_t s_ir_ac_ring[RING_SIZE]; // pulsatile part only
 static int32_t s_red_ac_ring[RING_SIZE];
 static size_t s_ring_head;
 static size_t s_ring_count;
@@ -87,7 +82,7 @@ static esp_err_t reg_read(uint8_t reg, uint8_t *value)
     return i2c_master_transmit_receive(s_dev, &reg, 1, value, 1, 1000 / portTICK_PERIOD_MS);
 }
 
-// Must be called with s_lock held (or before any other task can run).
+// Call with s_lock held.
 static void reset_buffers(void)
 {
     s_ring_head = 0;
@@ -98,9 +93,7 @@ static void reset_buffers(void)
 
 esp_err_t max30102_init(i2c_master_bus_handle_t bus)
 {
-    // Created first, before any possible early return below: estimate_vitals()
-    // is called once a second regardless and takes s_lock first - a failed
-    // init must not leave it as xSemaphoreTake(NULL, ...).
+    // Create it first, estimate_vitals() takes it even if init fails.
     s_lock = xSemaphoreCreateMutex();
     if (s_lock == NULL) {
         ESP_LOGE(TAG, "xSemaphoreCreateMutex failed");
@@ -129,19 +122,15 @@ esp_err_t max30102_init(i2c_master_bus_handle_t bus)
     reg_write(REG_OVF_COUNTER, 0x00);
     reg_write(REG_FIFO_RD_PTR, 0x00);
 
-    // SMP_AVE must stay 1: the chip *decimates* by the averaging factor, so
-    // avg=4 at 100 sps put only 25 samples/s into the FIFO while everything
-    // here assumes SAMPLE_RATE_HZ=100 (HR read ~2x too high). LED pulse rate
-    // is set by SPO2_SR, not averaging, so this costs no extra LED current.
-    reg_write(REG_FIFO_CONFIG, 0x1F);  // sample avg=1, rollover enabled, A_FULL=15
-    reg_write(REG_SPO2_CONFIG, 0x27);  // ADC range 4096nA, 100 sps, pulse width 411us (18-bit)
+    // SMP_AVE must stay 1: the chip decimates by it, and the code assumes 100 sps.
+    reg_write(REG_FIFO_CONFIG, 0x1F); // avg=1, rollover, A_FULL=15
+    reg_write(REG_SPO2_CONFIG, 0x27); // 4096 nA, 100 sps, 411 us (18-bit)
     reg_write(REG_LED1_PA, LED_PA_DEFAULT);
     reg_write(REG_LED2_PA, LED_PA_DEFAULT);
     reg_write(REG_INTR_ENABLE_1, 0x00);
     reg_write(REG_INTR_ENABLE_2, 0x00);
-    // SPO2_CONFIG/LED_PA persist across shutdown - leave the sensor off
-    // (<1 uA) until max30102_start() wakes it.
-    reg_write(REG_MODE_CONFIG, 0x80);  // SHDN
+    // Config survives shutdown, stay off until max30102_start().
+    reg_write(REG_MODE_CONFIG, 0x80);
 
     reset_buffers();
     ESP_LOGI(TAG, "MAX30102 initialised (shut down)");
@@ -182,7 +171,7 @@ static int32_t bandpass_step(bandpass_t *bp, uint32_t x)
     return (int32_t)lround(bp->lp - bp->base);
 }
 
-// Must be called with s_lock held.
+// Call with s_lock held.
 static void ring_push(uint32_t ir, uint32_t red)
 {
     s_ir_ring[s_ring_head] = ir;
@@ -209,7 +198,7 @@ esp_err_t max30102_poll(void)
 
     int available = (int)wr_ptr - (int)rd_ptr;
     if (available < 0) {
-        available += 32; // FIFO is 32 samples deep, pointers wrap at 5 bits
+        available += 32; // 32-sample FIFO, 5-bit pointers
     }
 
     for (int i = 0; i < available; i++) {
@@ -222,24 +211,24 @@ esp_err_t max30102_poll(void)
         uint32_t ch1 = (((uint32_t)raw[0] & 0x03) << 16) | ((uint32_t)raw[1] << 8) | raw[2];
         uint32_t ch2 = (((uint32_t)raw[3] & 0x03) << 16) | ((uint32_t)raw[4] << 8) | raw[5];
 #ifdef CONFIG_MIOT_MAX30102_LEDS_SWAPPED
-        // Some MAX30102 boards have the red and IR LEDs fitted the other way round.
+        // Some boards have red and IR swapped.
         uint32_t ir = ch1, red = ch2;
 #else
-        uint32_t red = ch1, ir = ch2; // datasheet order: LED1 = red, LED2 = IR
+        uint32_t red = ch1, ir = ch2; // LED1 = red, LED2 = IR
 #endif
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
         ring_push(ir, red);
         xSemaphoreGive(s_lock);
 #ifdef CONFIG_MIOT_CALIBRATION_MODE
-        printf("PPG,%lu,%lu\n", (unsigned long)ir, (unsigned long)red); // raw 100 Hz for offline analysis
+        printf("PPG,%lu,%lu\n", (unsigned long)ir, (unsigned long)red); // raw 100 Hz
 #endif
     }
 
     return ESP_OK;
 }
 
-// Written/read only by the caller of estimate_vitals (the sender task).
+// Sender task only.
 static max30102_debug_t s_debug;
 static int32_t s_win_ir[WINDOW_SAMPLES], s_win_red[WINDOW_SAMPLES];
 
@@ -263,11 +252,9 @@ static double rms_about_mean(const int32_t *x, int n)
     return sqrt(ss / n);
 }
 
-// Pulse period by autocorrelation over the whole window. Unlike detecting
-// individual beats, this isn't thrown off by the secondary (dicrotic) wave
-// or by noise near the crossing point - on a real low-perfusion recording
-// the per-beat detector paired up intervals like 45+91 samples (= two real
-// beats) and read ~15% high. Returns bpm, quality in *q (0..1).
+// Pulse period from autocorrelation over the whole window. Per-beat
+// detection got confused by the dicrotic wave and read ~15% high.
+// Returns bpm, quality (0..1) in *q.
 static double autocorr_hr(int32_t *x, int n, double *q)
 {
     int64_t sum = 0;
@@ -298,8 +285,7 @@ static double autocorr_hr(int32_t *x, int n, double *q)
             best = k;
         }
     }
-    // Prefer the first strong local maximum: the true period, not a 2x
-    // multiple of it that happens to correlate slightly better.
+    // Take the first strong peak, not a 2x multiple.
     for (int k = 1; k < N_LAGS - 1; k++) {
         if (ac[k] >= ac[k - 1] && ac[k] >= ac[k + 1] && ac[k] >= 0.8 * ac[best]) {
             best = k;
@@ -307,7 +293,7 @@ static double autocorr_hr(int32_t *x, int n, double *q)
         }
     }
     if (best == 0 || best == N_LAGS - 1) {
-        return 0; // peak at the search edge = no real period in range
+        return 0; // peak at the edge = no period in range
     }
     *q = ac[best];
     double a = ac[best - 1], b = ac[best], c = ac[best + 1];
@@ -323,7 +309,7 @@ esp_err_t max30102_estimate_vitals(int *out_hr_bpm, int *out_spo2_pct, bool *out
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_ring_count < WINDOW_SAMPLES) {
         xSemaphoreGive(s_lock);
-        return ESP_OK; // not enough data yet
+        return ESP_OK; // not enough data
     }
     size_t start = (s_ring_head + RING_SIZE - WINDOW_SAMPLES) % RING_SIZE;
     uint64_t ir_sum = 0, red_sum = 0;
@@ -338,8 +324,7 @@ esp_err_t max30102_estimate_vitals(int *out_hr_bpm, int *out_spo2_pct, bool *out
 
     double ir_dc = (double)ir_sum / WINDOW_SAMPLES;
     double red_dc = (double)red_sum / WINDOW_SAMPLES;
-    // RMS of the pulsatile part rather than max-min: a single motion spike
-    // no longer dominates the amplitude, and with it the SpO2 ratio.
+    // RMS instead of max-min, so one motion spike doesn't skew SpO2.
     double ir_ac = rms_about_mean(s_win_ir, WINDOW_SAMPLES);
     double red_ac = rms_about_mean(s_win_red, WINDOW_SAMPLES);
     double quality;
@@ -359,12 +344,10 @@ esp_err_t max30102_estimate_vitals(int *out_hr_bpm, int *out_spo2_pct, bool *out
         .pulse_ok = pulse_ok,
     };
     if (!pulse_ok) {
-        return ESP_OK; // no finger, movement, or no clear pulse - report nothing rather than noise
+        return ESP_OK; // no finger / movement / no clear pulse
     }
 
-    // --- SpO2: ratio-of-ratios, linear curve SpO2 = A - B*R ---
-    // No R-curve ships with the MAX30102; A/B are set in menuconfig from
-    // calibration (default: the common rough 110 - 25*R).
+    // SpO2 = A - B*R (ratio of ratios), A/B from menuconfig.
     double spo2 = CONFIG_MIOT_SPO2_COEF_A_X100 / 100.0 - (CONFIG_MIOT_SPO2_COEF_B_X100 / 100.0) * s_debug.ratio;
     if (spo2 > 100.0) spo2 = 100.0;
     if (spo2 < 0.0) spo2 = 0.0;

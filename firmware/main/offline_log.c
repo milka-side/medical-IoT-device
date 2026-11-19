@@ -12,21 +12,19 @@
 
 static const char *TAG = "offline_log";
 
-// partitions.csv: data partition, custom subtype 0x40, 1 MB - enough for a
-// full 10-minute ECG (~0.5 MB of JSON) plus the vitals/temperature lines.
+// "measbuf" partition (1 MB), fits a 10-minute ECG.
 #define PARTITION_LABEL "measbuf"
 
 #define FLASH_SECTOR 4096
 #define COPY_CHUNK   2048
 
 static const esp_partition_t *s_part;
-// Bytes used. Erased flash reads 0xFF and JSON text never contains 0xFF,
-// so after a reboot the end is simply the first 0xFF byte.
+// Bytes used. Erased flash is 0xFF, so after a reboot the end is the first 0xFF.
 static size_t s_used;
 static bool s_header_pending;
 static uint32_t s_boot_id;
 
-// Anything earlier means the clock was never synced (no RTC on the board).
+// Earlier = clock never synced.
 #define MIN_VALID_EPOCH 1700000000
 static bool s_full_warned;
 
@@ -122,9 +120,9 @@ bool offline_log_copy_to_sd(void)
     if (!offline_log_has_data()) {
         return true;
     }
-    sd_logger_reinit(); // see sd_logger.h - the card needs a fresh init after an ECG
+    sd_logger_reinit(); // card needs a re-init after an ECG
     if (!sd_logger_file_begin()) {
-        return false; // no card - keep the data, retry later
+        return false; // no card, retry later
     }
     static uint8_t buf[COPY_CHUNK];
     for (size_t off = 0; off < s_used; off += sizeof(buf)) {
@@ -142,7 +140,7 @@ bool offline_log_copy_to_sd(void)
 
     size_t erase_len = (s_used + FLASH_SECTOR - 1) / FLASH_SECTOR * FLASH_SECTOR;
     if (esp_partition_erase_range(s_part, 0, erase_len) != ESP_OK) {
-        // Data is safely on the card; at worst it gets copied again later.
+        // It's on the card, worst case it gets copied twice.
         ESP_LOGE(TAG, "erasing the buffer failed");
         s_used = find_end();
         return false;

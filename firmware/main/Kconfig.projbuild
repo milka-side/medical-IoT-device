@@ -12,10 +12,7 @@ menu "Medical IoT Device"
         string "Server URL for SD-card uploads"
         default "http://192.168.1.100:3000"
         help
-            Address of web/server.js, e.g.
-            http://<IP of the computer running npm start>:3000
-            Used only by "Завантажити дані з SD" (POST /api/sd-upload);
-            telemetry and commands go through Azure IoT Hub.
+            Server address, e.g. http://192.168.1.50:3000. Only used for SD uploads.
 
     config MIOT_API_KEY
         string "X-API-Key header for SD uploads (leave empty if server has none)"
@@ -29,83 +26,56 @@ menu "Medical IoT Device"
         int "SpO2 curve SpO2 = A - B*R: A x100"
         default 11000
         help
-            Intercept of the linear SpO2 calibration, in hundredths
-            (11000 = 110.00). Default is the common uncalibrated 110 - 25*R.
+            Intercept A in hundredths (11000 = 110.00).
 
     config MIOT_SPO2_COEF_B_X100
         int "SpO2 curve SpO2 = A - B*R: B x100"
         default 2500
         help
-            Slope of the linear SpO2 calibration, in hundredths (2500 = 25.00).
+            Slope B in hundredths (2500 = 25.00).
 
     config MIOT_MAX30102_LEDS_SWAPPED
         bool "MAX30102 board has red and IR LEDs swapped"
         default n
         help
-            Some MAX30102 breakout boards have the two LEDs fitted the other
-            way round (datasheet: LED1 = red, LED2 = IR). Check with the LED
-            test in calibration mode: if the visibly red glow appears while
-            only LED2 is on, enable this.
+            Enable if the red glow shows while only LED2 is on (calibration LED test).
 
     config MIOT_TEMP_TISSUE_K_X100
         int "Body-temperature estimate: tissue/ambient coefficient k, x100"
         default 19
         help
-            The TMP117 (factory-accurate, +-0.1 C) reads fingertip skin
-            temperature, which is what the dashboard shows. The approximate
-            body temperature shown next to it is computed, not a fixed
-            offset: heat flows from the body core through the finger out to
-            the room, so the core is warmer than the skin by an amount that
-            grows with the skin-to-room difference:
-                body = skin + k * (skin - room)
-            "room" is measured by the same sensor while nobody touches it.
-            k = 0.19 (19) from a healthy adult: skin 35.43 C, room 28.83 C,
-            body ~36.7 C.
+            body = skin + k * (skin - room), room is read while idle.
+            k = 0.19 from skin 35.43 C, room 28.83 C, body ~36.7 C.
 
     config MIOT_BOOT_LOCKOUT_S
         int "No measurements for this many seconds after power-on"
         range 0 3600
         default 600
         help
-            Sensor warm-up: measurement requests are ignored for this long
-            after the board powers on and the dashboard shows a countdown.
-            "Виміряти все одно" on the dashboard or a double press on the
-            button still starts a measurement. 0 disables the lockout.
+            Warm-up after power-on, measurements are refused. "Виміряти все одно"
+            or a double press still works. 0 = off.
 
     config MIOT_CALIBRATION_MODE
         bool "Calibration mode (raw sensor values to serial, everything always on)"
         default n
         help
-            For calibrating: skips the boot lockout, keeps ECG, pulse/SpO2
-            and temperature measuring continuously, and prints one line per
-            second to the serial console:
+            No warm-up, all sensors always on, Wi-Fi off. Prints one line a second:
             CAL,uptime_s,temp_c_raw,ir_dc,ir_ac_rms,red_dc,red_ac_rms,R,hr,quality,spo2,finger,pulse_ok,lod,adc_sps,dup_reads
-            and ECG,<sample> lines at 200 Hz. Wi-Fi stays off (no network noise).
-            Never leave this on in a normal build.
+            plus ECG,<sample> at 200 Hz. Don't leave it on.
 
     config MIOT_LIGHT_SLEEP
         bool "Light-sleep between telemetry posts when nothing is measured"
         depends on PM_ENABLE
         default y
         help
-            With power management enabled the CPU already drops to 40 MHz
-            when idle; this additionally lets the chip light-sleep between
-            the once-a-second posts while no ECG/pulse window is open.
-            While the USB Serial/JTAG port is plugged into a computer the
-            chip stays awake anyway (USJ_NO_AUTO_LS_ON_CONNECTION), so
-            flashing and the serial monitor keep working.
+            Light sleep between sends when idle. Stays awake while USB is plugged in.
 
     config MIOT_AZURE_ENABLE
         bool "Send telemetry to Azure IoT Hub"
         default y
         help
-            Publishes the same JSON payload to Azure IoT Hub over MQTT
-            (mqtts://<hub>.azure-devices.net:8883, TLS, SAS token generated
-            on the device). The dashboard reads it back through the hub's
-            built-in Event Hub-compatible endpoint (web/src/azure-ingest.js),
-            and dashboard commands arrive as direct methods. This is the
-            only telemetry channel: with it off the device sends nothing
-            and keeps measurements for the SD card.
+            Telemetry and commands over Azure IoT Hub (MQTT, TLS, SAS token).
+            The only channel: with it off nothing is sent.
 
     config MIOT_AZURE_CONNECTION_STRING
         string "Azure IoT Hub device connection string"
@@ -113,10 +83,7 @@ menu "Medical IoT Device"
         default ""
         help
             HostName=<hub>.azure-devices.net;DeviceId=<id>;SharedAccessKey=<key>
-            - the device's "Primary connection string" from the portal or
-            `az iot hub device-identity connection-string show`.
-            Keep it out of git: put it in sdkconfig.defaults.local or set
-            it in menuconfig (sdkconfig is not committed).
+            Keep it in sdkconfig.defaults.local, not in git.
 
     config MIOT_AZURE_IDLE_PERIOD_S
         int "Seconds between idle status messages to Azure"
@@ -124,8 +91,6 @@ menu "Medical IoT Device"
         range 1 3600
         default 60
         help
-            While no measurement is running only one status message per
-            this many seconds goes to Azure (measurement data is always
-            sent). The free F1 tier allows 8000 messages/day.
+            One status message per this many seconds while idle (F1 = 8000/day).
 
 endmenu

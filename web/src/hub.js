@@ -12,8 +12,7 @@ function broadcast(payload) {
   }
 }
 
-// Each batch carries boot+seq; remember recent ones and drop a repeat
-// (e.g. the Event Hub endpoint redelivering after a reconnect).
+// Drop repeats by boot+seq (Event Hub can redeliver).
 const DEDUPE_TTL_MS = 120000;
 const seen = new Map();
 
@@ -48,11 +47,8 @@ function ingest(raw, source) {
   const prev = latest.get(msg.device_id) || {};
   const { ecg, fs, ...vitals } = msg;
   const merged = { ...prev, ...vitals };
-  // These only mean something while actively counting down - if this
-  // message doesn't carry one, that measurement has ended, so the stored
-  // snapshot must drop it too. Otherwise a browser that (re)connects after
-  // the window closed would see a stale "3s remaining" and the dashboard
-  // would show that button as still active forever.
+  // Countdowns only exist while running. Drop them when a message comes
+  // without them, or a reconnecting browser sees a stale timer.
   for (const key of ['lockout_remaining_s', 'ecg_remaining_s', 'vitals_remaining_s', 'temp_remaining_s', 'lod', 'adc_sps']) {
     if (!(key in vitals)) delete merged[key];
   }
@@ -65,7 +61,7 @@ function ingest(raw, source) {
   return res;
 }
 
-// Extra consumers of every accepted message (e.g. history recording).
+// Extra consumers of every message (history).
 const listeners = [];
 function addListener(fn) { listeners.push(fn); }
 

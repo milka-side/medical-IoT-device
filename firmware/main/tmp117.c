@@ -4,8 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-// Adafruit TMP117 breakout pulls ADDR low on-board when unconnected -> 0x48.
-// Change if the ADDR pin is actually bridged to VCC/SDA/SCL on the real board.
+// ADDR pulled low on the breakout -> 0x48.
 #define TMP117_I2C_ADDR   0x48
 
 #define TMP117_REG_TEMP_RESULT  0x00
@@ -42,8 +41,7 @@ esp_err_t tmp117_init(i2c_master_bus_handle_t bus)
     err = read_reg16(TMP117_REG_DEVICE_ID, &id);
     ESP_LOGI(TAG, "device id = 0x%04X (expect 0x0117), err=%s", id, esp_err_to_name(err));
 
-    // Default config (continuous conversion, ~1 Hz, no averaging) works fine
-    // as-is; nothing to write here.
+    // Default config (continuous, ~1 Hz) is fine.
     return err;
 }
 

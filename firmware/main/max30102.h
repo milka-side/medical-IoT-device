@@ -4,43 +4,32 @@
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 
-// One-time I2C/reset/FIFO setup. Leaves the sensor in shutdown (<1 uA) -
-// call max30102_start() to actually turn the LEDs/ADC on.
+// One-time setup, leaves the sensor in shutdown.
 esp_err_t max30102_init(i2c_master_bus_handle_t bus);
 
-// Wakes the sensor into SpO2 mode (LEDs+ADC on) / puts it back into the
-// documented MAX3010x full-shutdown mode (MODE_CONFIG SHDN bit, <1 uA).
-// start() also clears the ring buffer and beat-detector state, same reason
-// as ads1293_start_conversion(): a fresh window shouldn't resume with a
-// stale baseline from before the LEDs were off.
+// Wake up in SpO2 mode / back to shutdown (<1 uA). start() also clears
+// the buffers.
 esp_err_t max30102_start(void);
 esp_err_t max30102_stop(void);
 
-// Drains the sensor's FIFO into an internal ring buffer. Call this often
-// (e.g. every 20-50 ms) from the sampling loop.
+// Moves the FIFO into the ring buffer. Call every 20-50 ms.
 esp_err_t max30102_poll(void);
 
-// Pulse rate (autocorrelation of the band-passed IR signal) and SpO2
-// (ratio-of-ratios of RMS pulsatile amplitudes, linear curve from
-// menuconfig) over the last 8 s. Not a medical device. *out_valid is false
-// when there is no finger, the finger is moving, or the pulse isn't clear
-// enough to trust - nothing is reported rather than a noisy guess.
+// HR (autocorrelation of IR) and SpO2 over the last 8 s. *out_valid is
+// false without a finger, with movement or with no clear pulse.
 esp_err_t max30102_estimate_vitals(int *out_hr_bpm, int *out_spo2_pct, bool *out_valid);
 
-// Sets the LED1/LED2 pulse amplitudes (MAX30102 register units, ~0.2 mA per
-// LSB). Used by calibration mode to light one LED at a time.
+// LED1/LED2 current (~0.2 mA per LSB), for calibration mode.
 esp_err_t max30102_set_led_currents(uint8_t led1_pa, uint8_t led2_pa);
 
-// Raw quantities behind the last max30102_estimate_vitals() call, for
-// calibration logging. ir_ac/red_ac are RMS pulsatile amplitudes, ratio
-// is the SpO2 ratio-of-ratios R (0 if unknown).
+// Raw values behind the last estimate, for calibration logs.
 typedef struct {
     double ir_dc, ir_ac, red_dc, red_ac;
     double ratio;
-    double hr;      // autocorrelation estimate, even if not trusted
-    double quality; // normalised autocorrelation peak, 0..1
-    bool finger;    // IR DC level high enough to mean a finger is on the sensor
-    bool pulse_ok;  // finger + clear periodic pulse: hr/SpO2 are reported
+    double hr; // even if not trusted
+    double quality; // autocorrelation peak, 0..1
+    bool finger; // finger on the sensor
+    bool pulse_ok; // finger + clear pulse, values reported
 } max30102_debug_t;
 
 void max30102_get_debug(max30102_debug_t *out);

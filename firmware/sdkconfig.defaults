@@ -1,56 +1,35 @@
-# Target: Seeed XIAO ESP32-C6 ("ESP32_C6 speed studio" on the schematic)
+# Seeed XIAO ESP32-C6
 CONFIG_IDF_TARGET="esp32c6"
 
-# Give the Wi-Fi / TLS events enough stack headroom
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
-# Default single-app partition table (factory=1MB) is too small once
-# Wi-Fi+MQTT/HTTP clients+mbedTLS are linked in - use a bigger app partition.
-# XIAO ESP32-C6 has 4MB flash, so 3MB for the app leaves plenty of room.
+# 4 MB flash, bigger app partition (see partitions.csv)
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
-# Console on the built-in USB-Serial-JTAG only. The default primary console
-# is UART0, whose TX on ESP32-C6 is GPIO16 - the same pin as ADS1293 DRDYB
-# (D6), so log output and the chip's data-ready output fought over one wire.
+# Console on USB only: UART0 TX is GPIO16, which is ADS1293 DRDYB
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
-# Power management (CPU frequency scaling + automatic light sleep) is off:
-# with it the board kept dropping off USB / looking hung. The CPU stays
-# awake; the sensors are still powered down between measurements and the
-# Wi-Fi radio still uses modem sleep while no ECG is recorded.
+# Power management off, with it the board kept dropping off USB
 # CONFIG_PM_ENABLE is not set
 
-# Sensor calibration for this board, measured 2026-11-08 on a healthy adult
-# at rest (raw data captured with CONFIG_MIOT_CALIBRATION_MODE):
-# - MAX30102 LEDs are fitted swapped on this breakout: LED1 lights the IR
-#   channel (LED1-only gave 4.5x the photodiode signal of LED2-only, the
-#   "red" channel had the higher finger DC, and only the swapped order gave
-#   a plausible R and the cleaner pulse).
-# - SpO2 = A - 25*R with A from a single point: median R 0.652 -> 98 %.
-#   Valid near normal saturation only (no reference oximeter was used).
-# - Temperature: the dashboard shows the measured fingertip temperature
-#   (mean of the settled part of a 3-minute contact) and, as an estimate,
-#   body = skin + k*(skin - room), room measured by the TMP117 while idle.
-#   k = 0.19 from a healthy adult on 2026-11-18: skin 35.43 C, room
-#   28.83 C, body ~36.7 C. (A fixed +2.75 C offset read 38.2 C there.)
-#   Fingertip temperature only approximates body temperature.
+# Calibration for this board (2026-11-08 and 2026-11-18, healthy adult):
+# - LEDs are swapped on this breakout (LED1 lights the IR channel)
+# - SpO2 = A - 25*R, A from one point: R 0.652 -> 98 % (no reference oximeter)
+# - body temp = skin + k*(skin - room), k = 0.19 (skin 35.43, room 28.83 -> ~36.7 C)
 CONFIG_MIOT_MAX30102_LEDS_SWAPPED=y
 CONFIG_MIOT_SPO2_COEF_A_X100=11430
 CONFIG_MIOT_SPO2_COEF_B_X100=2500
 CONFIG_MIOT_TEMP_TISSUE_K_X100=19
 
-# Board (ESP32-C6FH4) has 4MB flash - confirmed via `esptool flash_id`.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 
-# Local dev defaults (edit with `idf.py menuconfig` -> Medical IoT Device,
-# or change below) - open guest Wi-Fi, no password.
+# Dev defaults, override in sdkconfig.defaults.local
 CONFIG_MIOT_WIFI_SSID="UCU_Guest"
 CONFIG_MIOT_WIFI_PASSWORD=""
 CONFIG_MIOT_SERVER_URL="http://10.10.241.83:3000"
 
-# microSD logging (sd_logger.c): long file names (meas_00001.jsonl),
-# name buffer on the heap rather than the task stack.
+# Long file names on the SD card (meas_00001.jsonl)
 CONFIG_FATFS_LFN_HEAP=y

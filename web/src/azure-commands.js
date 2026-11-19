@@ -1,22 +1,16 @@
-// Dashboard commands to the device over Azure IoT Hub direct methods: the
-// server calls method "command" on the device with {"commands":["all"]} and
-// gets an immediate answer - accepted (200) or refused with a reason (4xx) -
-// or an error if the device isn't connected to the hub.
-//
-// Needs the hub's service connection string (policy iothubowner):
-// AZURE_IOTHUB_CONNECTION_STRING, or derived from what .azure.env already
-// holds - the hub host from AZURE_DEVICE_CONNECTION_STRING and the policy
-// key from AZURE_EVENTHUB_CONNECTION_STRING (the built-in Event Hub endpoint
-// is signed with the same iothubowner key).
+// Dashboard commands as Azure direct method "command" ({"commands":["all"]}).
+// The device answers 200 or 4xx with a reason.
+// Needs the service connection string: AZURE_IOTHUB_CONNECTION_STRING, or
+// built from AZURE_DEVICE_CONNECTION_STRING (host) and
+// AZURE_EVENTHUB_CONNECTION_STRING (iothubowner key).
 const { Client } = require('azure-iothub');
 
 const METHOD = 'command';
 
-// Dashboard buttons. all_force = "Виміряти все одно": measure everything
-// even during the device's power-on sensor warm-up.
+// all_force = "Виміряти все одно" (measure during warm-up).
 const VALID_TYPES = new Set(['ecg', 'vitals', 'temp', 'all', 'all_force', 'sd_upload']);
 
-// Refusal codes the firmware sends back (main.c on_azure_command).
+// Refusal reasons from the firmware (on_azure_command).
 const REASONS = {
   warmup: 'датчики ще прогріваються після ввімкнення — натисни «Виміряти все одно»',
   measuring: 'зараз іде вимірювання — SD-картку можна прочитати після нього',
@@ -54,7 +48,7 @@ function startAzureCommands() {
   return true;
 }
 
-// null = Azure commands not configured. Otherwise { delivered, status, reason, error }.
+// null = not configured, otherwise { delivered, status, reason, error }.
 async function sendCommand(type) {
   if (!client) return null;
   try {

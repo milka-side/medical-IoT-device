@@ -3,8 +3,8 @@ const DEFAULT_FS = 250;
 const RANGES = {
   hr: [20, 300],
   spo2: [50, 100],
-  temp: [10, 45],      // measured fingertip temperature (a cold finger can be well below 30)
-  temp_body: [30, 45], // device's estimate of body temperature
+  temp: [10, 45], // fingertip, a cold finger can be well below 30
+  temp_body: [30, 45], // body estimate
   temp_room: [-10, 60],
   battery: [0, 100],
 };
@@ -61,8 +61,7 @@ function normalize(input, receivedAt = Date.now()) {
     }
   }
 
-  // Статус простою/блокування/вимірювання - окремий, самодостатній тип
-  // повідомлення (heartbeat без ecg/hr/spo2/temp), а не "сміття".
+  // Status-only message (heartbeat), still valid.
   if (typeof input.status === 'string' && input.status) {
     msg.status = input.status.slice(0, 32);
   }

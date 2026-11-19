@@ -14,9 +14,7 @@
 
 static const char *TAG = "ads1293";
 
-// Register addresses, from ProtoCentral's open-source ADS1293 library
-// (github.com/Protocentral/protocentral-ads1293-arduino, src/Protocentral_ADS1293.h),
-// cross-reference with TI datasheet SNAS602C sec. 8.6 if a reading looks wrong.
+// Register addresses (from ProtoCentral's ADS1293 library, see TI SNAS602C).
 #define REG_CONFIG          0x00
 #define REG_FLEX_CH1_CN     0x01
 #define REG_FLEX_CH2_CN     0x02
@@ -66,13 +64,9 @@ static const char *TAG = "ads1293";
 static spi_device_handle_t s_spi;
 static SemaphoreHandle_t s_drdy_sem;
 
-// The SD module keeps driving its MISO line even while deselected, so the
-// ADS1293's SDO has its own pin. The bus is initialised with the SD card's
-// MISO; for the duration of each ADS1293 transaction the bus's MISO input
-// is re-routed (GPIO matrix) to the ADS1293 pin and then handed back. The
-// SPI driver holds the bus lock across pre_cb..post_cb, so the SD card's
-// transactions never see the swapped input. Plain variables (DRAM), as the
-// callbacks run from the SPI ISR.
+// The SD module drives MISO even when deselected, so the ADS1293 SDO has
+// its own pin. MISO is switched to it for each ADS1293 transaction (GPIO
+// matrix) and switched back after. Runs from the SPI ISR.
 static int s_miso_gpio = -1;
 static int s_bus_miso_gpio = -1;
 static uint32_t s_spiq_in_signal;
@@ -122,13 +116,8 @@ static esp_err_t reg_read(uint8_t addr, uint8_t *value)
     return err;
 }
 
-// Reads `len` consecutive registers starting at `addr` in a single SPI
-// transaction (one CS-low..CS-high window). A single spi_device_transmit
-// call is atomic w.r.t. FreeRTOS task scheduling - the CS line can't be
-// released mid-transfer for another task to run - unlike doing N separate
-// reg_read() calls, where a scheduler preemption between them could let
-// the chip advance to a new conversion between bytes, splicing together a
-// 24-bit value from two different samples.
+// Reads `len` registers in one transaction, so all bytes come from the
+// same sample.
 static esp_err_t reg_read_burst(uint8_t addr, uint8_t *out, size_t len)
 {
     uint8_t tx[8] = {0};
@@ -146,12 +135,7 @@ static esp_err_t reg_read_burst(uint8_t addr, uint8_t *out, size_t len)
     return err;
 }
 
-// Wiring/SPI-mode bring-up diagnostic - leave at 0 for normal operation.
-// The register sequence below already assumes mode 0 @ 1 MHz works (that
-// was confirmed with this sweep during bring-up). Flip to 1 only when
-// chasing a dead/garbled REVID read; running it on every boot adds ~8
-// extra SPI transactions and several hundred ms of avoidable startup
-// delay/log spam for no benefit once the wiring is known good.
+// Set to 1 to try all SPI modes at boot (wiring debug only).
 #define ADS1293_RUN_SPI_DIAG_SWEEP 0
 
 #if ADS1293_RUN_SPI_DIAG_SWEEP
@@ -183,11 +167,8 @@ static uint8_t spi_probe_revid_once(spi_host_device_t host, int cs_gpio, uint8_t
     return rx[1];
 }
 
-// Tries every SPI mode (CPOL/CPHA) at two clock speeds and logs the REVID
-// read back from each combination. A correctly wired, powered ADS1293
-// should answer with a non-0x00/0xFF value on at least one of these - if
-// every combination comes back 0x00/0xFF/0xEE, the problem is physical
-// (wiring, power, CS, or a dead/absent chip), not SPI configuration.
+// Logs REVID for every SPI mode / speed. If all are 0x00/0xFF, it's
+// wiring or power, not SPI settings.
 static void ads1293_spi_diagnostic_sweep(spi_host_device_t host, int cs_gpio)
 {
     const int clocks[] = {100000, 1000000};
@@ -211,7 +192,7 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio, int miso_gpio, int b
 #endif
 
     spi_device_interface_config_t devcfg = {
-        .clock_speed_hz = 1 * 1000 * 1000, // ADS1293 SPI max ~2 MHz, stay conservative
+        .clock_speed_hz = 1 * 1000 * 1000, // ADS1293 max ~2 MHz
         .mode = 0,
         .spics_io_num = cs_gpio,
         .queue_size = 4,
@@ -237,8 +218,7 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio, int miso_gpio, int b
 
     s_drdy_sem = xSemaphoreCreateBinary();
 
-    // DRDYB is a push-pull output, no pull needed - and ProtoCentral's
-    // README explicitly says to remove any pull-up/down on DRDY.
+    // DRDYB is push-pull, no pull-up needed.
     gpio_config_t io_conf = {
         .pin_bit_mask = 1ULL << PIN_ADS1293_DRDY,
         .mode = GPIO_MODE_INPUT,
@@ -249,94 +229,60 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio, int miso_gpio, int b
     gpio_install_isr_service(0);
     gpio_isr_handler_add(PIN_ADS1293_DRDY, drdy_isr_handler, NULL);
 
-    // Make sure we are in config mode (START_CON=0) before touching registers.
+    // Config mode first (START_CON=0).
     reg_write(REG_CONFIG, 0x00);
 
     uint8_t revid = 0;
     reg_read(REG_REVID, &revid);
     ESP_LOGI(TAG, "REVID = 0x%02X (expect non-zero, non-0xFF if SPI wiring is OK)", revid);
 
-    // Based on ProtoCentral's 3-lead sequence, but trimmed to what this
-    // device actually wires up: a single 3-electrode cable (RA, LA, RL) and
-    // only channel 1 (Lead I) is ever read. ProtoCentral's version also
-    // routes IN3 (LL) into channel 2 and into the common-mode detector -
-    // with no LL electrode that input floats, the common-mode estimate
-    // picks up whatever it floats to, and the RLD amp then drives that
-    // garbage back into the body as noise on Lead I.
-    // Cable wiring on this board (continuity-checked): red/sleeve -> IN1,
-    // yellow/tip -> IN2, green/ring -> IN3. So LA = yellow on IN2, RA = green
-    // on IN3, RL = red on IN1 (nothing on IN4, which is why RLD there left
-    // the body without a return path and both leads read as off).
-    // POS=IN3, NEG=IN2: with POS=IN2 (0x13) the QRS came out inverted on a
-    // real recording, so the colour<->limb assumption above is mirrored.
-    reg_write(REG_FLEX_CH1_CN, 0x1A);   // IN3-IN2 -> channel 1 (Lead I, upright QRS)
-    reg_write(REG_CMDET_EN, 0x06);      // common-mode from IN2+IN3 only (LA, RA)
-    reg_write(REG_RLD_CN, 0x01);        // RLD amp output -> IN1 (RL electrode)
+    // 3-electrode cable, only channel 1 is used. LL/IN4 aren't connected,
+    // so they stay out of the common-mode and RLD.
+    // Cable: red/sleeve -> IN1 (RL), yellow/tip -> IN2 (LA), green/ring -> IN3 (RA).
+    // POS=IN3, NEG=IN2, otherwise the QRS comes out inverted.
+    reg_write(REG_FLEX_CH1_CN, 0x1A); // IN3-IN2 -> channel 1
+    reg_write(REG_CMDET_EN, 0x06); // common-mode from IN2+IN3
+    reg_write(REG_RLD_CN, 0x01); // RLD -> IN1
 
-    // DC lead-off detection on RA/LA (same LOD_CN/LOD_CURRENT ProtoCentral's
-    // v2 library enables by default) - ERROR_LOD then reports which of the
-    // two sensing electrodes has no skin contact.
+    // DC lead-off on RA/LA, ERROR_LOD says which one is off.
     reg_write(REG_LOD_CN, 0x00);
-    reg_write(REG_LOD_EN, 0x06);        // IN2 (LA) + IN3 (RA)
+    reg_write(REG_LOD_EN, 0x06); // IN2 (LA) + IN3 (RA)
     reg_write(REG_LOD_CURRENT, 0x04);
 
-    // Verified against ProtoCentral's own ads1293-arduino v2.0 startClock():
-    // force OSC_CN to 0 first, give the crystal 20ms to settle, only then
-    // raise STRTCLK (0x04) - this board had been working without the
-    // settle delay, but skipping it risks an unreliable clock lock on a
-    // cold boot or a marginal crystal.
+    // Clock: OSC_CN = 0, wait 20 ms for the crystal, then STRTCLK.
     reg_write(REG_OSC_CN, 0x00);
     vTaskDelay(pdMS_TO_TICKS(20));
     reg_write(REG_OSC_CN, 0x04);
 
-    // Bits c / c+3 shut down channel (c+1)'s INA / sigma-delta - channels 2
-    // and 3 are both unused, so both are powered off (ProtoCentral's
-    // 3-lead default only shut down channel 3: 0x24).
+    // Channels 2 and 3 aren't used, power them off.
     reg_write(REG_AFE_SHDN_CN, 0x36);
-    reg_write(REG_AFE_PACE_CN, 0x01);   // PACE_SHDN - pace channel unused here, shut its AFE down
-    reg_write(REG_R2_RATE, 0x01);       // R2 = 4 (one-hot encoding, see datasheet)
-    reg_write(REG_R3_RATE_CH1, 0x04);   // R3 = 8 -> 102400/(4*4*8) = 800 sps (decimated x4 to 200 Hz)
-    reg_write(REG_DRDYB_SRC, 0x08);     // DRDYB pulses on channel 1 ECG ready
-    reg_write(REG_CH_CNFG, 0x10);       // ECG read-back on channel 1 only
+    reg_write(REG_AFE_PACE_CN, 0x01); // pace channel off
+    reg_write(REG_R2_RATE, 0x01); // R2 = 4
+    reg_write(REG_R3_RATE_CH1, 0x04); // R3 = 8 -> 102400/(4*4*8) = 800 sps
+    reg_write(REG_DRDYB_SRC, 0x08); // DRDYB on channel 1
+    reg_write(REG_CH_CNFG, 0x10); // read back channel 1 only
 
-    // Park in standby until a measurement window opens.
+    // Standby until a measurement starts.
     reg_write(REG_CONFIG, CONFIG_STANDBY);
     ESP_LOGI(TAG, "ADS1293 initialised (standby)");
     return ESP_OK;
 }
 
-// Clinical "monitor mode" ECG bandwidth is 0.5-40 Hz (vs. 0.05-150 Hz for
-// diagnostic 12-lead) per AAMI/AHA practice and real monitor datasheets
-// (Philips, Edan), plus a separate notch at mains frequency. Tuned to that
-// spec at the actual ODR (800 sps with the current R2/R3).
-//
-// The first version of the mains notch here was a double boxcar average,
-// which turned out to have a much lower effective cutoff than intended
-// (~15 Hz, not 40 Hz) - it was blurring real QRS slopes into rounded
-// humps, not just removing 50 Hz. Replaced with a narrow 2nd-order IIR
-// notch: zeros on the unit circle at exactly 50 Hz null that frequency,
-// poles at the same angle but radius r<1 keep the notch only a few Hz
-// wide, so 10-40 Hz content (where QRS slopes live) passes through
-// essentially unaffected.
+// Monitor-mode ECG band 0.5-40 Hz plus a 50 Hz notch, at 800 sps.
 
-// High-pass: EMA baseline tracker subtracted from the raw sample, cutoff
-// 0.5 Hz (alpha = 1 - exp(-2*pi*fc/fs)). Also sidesteps needing to know
-// the exact offset-binary zero point for this R2/R3 combo.
+// High-pass 0.5 Hz: subtract an EMA baseline.
 #define BASELINE_ALPHA 0.003919
 
-// Narrow notch at 50 Hz, ~4 Hz wide, at fs = 800 sps:
-//   w0 = 2*pi*50/800 = 0.39270 rad, cos(w0) = 0.92388
-//   r  = 1 - 3*BW*pi/fs = 1 - 3*4*pi/800 = 0.95288
-//   b1 = -2*cos(w0), b2 = 1 (zeros at e^{+-j w0})
-//   a1 = -2*r*cos(w0), a2 = r^2 (poles at same angle, radius r)
-//   gain = (1+a1+a2)/(1+b1+b2), normalizes passband gain to ~1
+// 50 Hz notch, ~4 Hz wide, fs = 800:
+//   w0 = 2*pi*50/800, r = 1 - 3*BW*pi/fs = 0.95288
+//   b = [1, -2cos(w0), 1], a = [1, -2r*cos(w0), r^2], gain normalizes to ~1
 #define NOTCH_B1 (-1.847759)
 #define NOTCH_B2 (1.0)
 #define NOTCH_A1 (-1.760685)
 #define NOTCH_A2 (0.907973)
 #define NOTCH_GAIN (0.967463)
 
-// Low-pass: single one-pole stage, cutoff 40 Hz (alpha = 1 - exp(-2*pi*fc/fs)).
+// Low-pass 40 Hz, one pole.
 #define LOWPASS_ALPHA 0.2696
 
 static double s_baseline;
@@ -344,10 +290,7 @@ static bool s_baseline_init = false;
 static double s_notch_x1, s_notch_x2, s_notch_y1, s_notch_y2;
 static double s_lowpass;
 
-// Reads that returned exactly the previous 24-bit code. With real noise two
-// consecutive conversions are practically never identical, so a high count
-// means DRDY fired without a new conversion (spurious edges) and the same
-// sample was read twice.
+// Reads equal to the previous code: DRDY fired without a new conversion.
 static uint32_t s_last_raw;
 static uint32_t s_dup_count;
 
@@ -360,19 +303,15 @@ uint32_t ads1293_take_duplicate_count(void)
 
 esp_err_t ads1293_start_conversion(void)
 {
-    // Drain any stale DRDY signal left over from before conversions were
-    // stopped, so the first xSemaphoreTake in ads1293_read_sample() blocks
-    // for a genuinely new sample instead of returning immediately.
+    // Clear an old DRDY so the first read waits for a fresh sample.
     xSemaphoreTake(s_drdy_sem, 0);
-    s_baseline_init = false; // force a clean filter-state reset on the next sample
+    s_baseline_init = false; // reset the filters on the next sample
     return reg_write(REG_CONFIG, CONFIG_START_CON);
 }
 
 esp_err_t ads1293_stop_conversion(void)
 {
-    // Standby rather than just clearing START_CON: powers the analog blocks
-    // down between windows but keeps every register, and writing START_CON
-    // later leaves standby directly (same as ProtoCentral's standby()/start()).
+    // Standby keeps the registers, START_CON wakes it up later.
     return reg_write(REG_CONFIG, CONFIG_STANDBY);
 }
 
@@ -381,8 +320,7 @@ esp_err_t ads1293_read_lead_off(uint8_t *out_mask)
     uint8_t v = 0;
     esp_err_t err = reg_read(REG_ERROR_LOD, &v);
     if (err == ESP_OK) {
-        // Remap to the bit0 = RA, bit1 = LA convention main.c/dashboard use:
-        // RA is IN3 (ERROR_LOD bit2), LA is IN2 (bit1).
+        // Remap to bit0 = RA (IN3), bit1 = LA (IN2).
         *out_mask = (uint8_t)(((v >> 2) & 0x01) | (v & 0x02));
     }
     return err;
@@ -399,10 +337,8 @@ esp_err_t ads1293_read_sample(int32_t *out_sample, uint32_t timeout_ms)
 
     uint32_t raw = ((uint32_t)bytes[0] << 16) | ((uint32_t)bytes[1] << 8) | bytes[2];
     if (raw == s_last_raw) {
-        // Measured on the real board: ~30% of DRDY interrupts were spurious
-        // and re-read the previous conversion, so 800 sps arrived as ~1150
-        // and the trace was stretched in time. Drop the repeat instead of
-        // feeding it into the filters as if it were a new sample.
+        // ~30% of DRDY interrupts were spurious and re-read the old sample.
+        // Drop those.
         s_dup_count++;
         return ESP_ERR_INVALID_STATE;
     }
@@ -417,10 +353,10 @@ esp_err_t ads1293_read_sample(int32_t *out_sample, uint32_t timeout_ms)
         s_baseline += ((double)raw - s_baseline) * BASELINE_ALPHA;
     }
 
-    // 1) high-pass (baseline removal)
+    // high-pass
     double centered = (double)raw - s_baseline;
 
-    // 2) narrow notch (mains hum only, ~48-52 Hz)
+    // notch
     double notched_raw = centered + NOTCH_B1 * s_notch_x1 + NOTCH_B2 * s_notch_x2 - NOTCH_A1 * s_notch_y1 -
                           NOTCH_A2 * s_notch_y2;
     double notched = notched_raw * NOTCH_GAIN;
@@ -429,7 +365,7 @@ esp_err_t ads1293_read_sample(int32_t *out_sample, uint32_t timeout_ms)
     s_notch_y2 = s_notch_y1;
     s_notch_y1 = notched_raw;
 
-    // 3) low-pass (general high-frequency/muscle noise, well above QRS content)
+    // low-pass
     s_lowpass += (notched - s_lowpass) * LOWPASS_ALPHA;
 
     *out_sample = (int32_t)s_lowpass;

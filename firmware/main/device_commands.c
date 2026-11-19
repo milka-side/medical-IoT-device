@@ -4,8 +4,7 @@
 
 measure_cmd_t device_commands_parse(const char *body)
 {
-    // Only look inside "commands":[...] - other fields of the response
-    // (error/warning strings) may mention words like temp or ecg.
+    // Only look inside "commands":[...].
     const char *start = body ? strstr(body, "\"commands\":[") : NULL;
     if (start == NULL) {
         return MEASURE_NONE;

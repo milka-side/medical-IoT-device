@@ -20,10 +20,10 @@ static const char *TAG = "telemetry_azure";
 #include "mbedtls/md.h"
 #include "mqtt_client.h"
 
-// SAS token lifetime and how long before expiry we reconnect with a new one.
+// SAS token lifetime and how early to renew it.
 #define SAS_TTL_S        (24 * 3600)
 #define SAS_RENEW_EARLY_S (15 * 60)
-// Anything before this is "clock not set yet" (SNTP hasn't synced).
+// Earlier = SNTP hasn't synced yet.
 #define MIN_VALID_EPOCH  1700000000
 
 static char s_host[128];
@@ -39,8 +39,8 @@ static esp_mqtt_client_handle_t s_client;
 static volatile bool s_connected;
 static azure_command_handler_t s_command_handler;
 
-// Direct methods: IoT Hub delivers calls on $iothub/methods/POST/<name>/?$rid=<id>
-// and expects the reply on $iothub/methods/res/<status>/?$rid=<id>.
+// Direct methods come on $iothub/methods/POST/<name>/?$rid=<id>,
+// the reply goes to $iothub/methods/res/<status>/?$rid=<id>.
 #define METHODS_TOPIC     "$iothub/methods/POST/#"
 #define METHODS_PREFIX    "$iothub/methods/POST/"
 
@@ -133,8 +133,7 @@ static bool parse_connection_string(const char *cs)
     return s_host[0] && s_device_id[0] && s_key_b64[0];
 }
 
-// Percent-encode everything except RFC 3986 unreserved characters
-// (same result as JavaScript's encodeURIComponent for ASCII input).
+// Like JS encodeURIComponent.
 static bool url_encode(const char *in, char *out, size_t cap)
 {
     static const char hex[] = "0123456789ABCDEF";
@@ -216,7 +215,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(TAG, "connected to Azure IoT Hub %s as %s, listening for direct methods", s_host, s_device_id);
         break;
     case MQTT_EVENT_DATA:
-        // Method calls are tiny - a fragmented (multi-part) one is ignored.
+        // Ignore fragmented messages, method calls are small.
         if (event->current_data_offset == 0 && event->data_len == event->total_data_len && event->topic_len > 0 &&
             strncmp(event->topic, METHODS_PREFIX, strlen(METHODS_PREFIX)) == 0) {
             handle_method(event->topic, event->topic_len, event->data, event->data_len);
@@ -233,8 +232,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                      event->error_handle->esp_transport_sock_errno,
                      strerror(event->error_handle->esp_transport_sock_errno));
         } else if (event->error_handle->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
-            // 4 = bad username/password (wrong key or expired/invalid SAS),
-            // 5 = not authorized (device disabled / unknown device id).
+            // 4 = bad SAS / key, 5 = device unknown or disabled.
             ESP_LOGE(TAG, "connection refused by hub, code %d - check the device connection string",
                      event->error_handle->connect_return_code);
         }
@@ -248,7 +246,7 @@ static void azure_task(void *arg)
 {
     (void)arg;
 
-    // Wall-clock time is needed for the SAS token's expiry.
+    // Need real time for the SAS expiry.
     esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
     esp_netif_sntp_init(&sntp_cfg);
     while (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000)) != ESP_OK || time(NULL) < MIN_VALID_EPOCH) {
@@ -264,8 +262,7 @@ static void azure_task(void *arg)
             return;
         }
 
-        // Full config both times: esp_mqtt_set_config() overwrites some
-        // fields (e.g. TLS verification) with whatever is passed in.
+        // Pass the full config every time, set_config overwrites fields.
         esp_mqtt_client_config_t cfg = {
             .broker.address.uri = s_uri,
             .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
@@ -290,14 +287,14 @@ static void azure_task(void *arg)
                 ESP_LOGE(TAG, "esp_mqtt_client_start failed: %s", esp_err_to_name(err));
             }
         } else {
-            // Token about to expire: swap in the new one and reconnect.
+            // Token about to expire: reconnect with a new one.
             esp_mqtt_set_config(s_client, &cfg);
             ESP_LOGI(TAG, "renewing SAS token, reconnecting");
             esp_mqtt_client_disconnect(s_client);
             esp_mqtt_client_reconnect(s_client);
         }
 
-        // Seconds * tick rate, not pdMS_TO_TICKS: ms*Hz would overflow 32 bits.
+        // ms * Hz would overflow 32 bits.
         vTaskDelay((TickType_t)(SAS_TTL_S - SAS_RENEW_EARLY_S) * configTICK_RATE_HZ);
     }
 }
@@ -312,7 +309,7 @@ esp_err_t telemetry_azure_init(void)
 
     snprintf(s_uri, sizeof(s_uri), "mqtts://%s:8883", s_host);
     snprintf(s_username, sizeof(s_username), "%s/%s/?api-version=2021-04-12", s_host, s_device_id);
-    // $.ct/$.ce mark the body as UTF-8 JSON for IoT Hub routing/queries.
+    // Mark the body as UTF-8 JSON.
     snprintf(s_topic, sizeof(s_topic), "devices/%s/messages/events/$.ct=application%%2Fjson&$.ce=utf-8",
              s_device_id);
 

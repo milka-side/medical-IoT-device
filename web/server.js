@@ -15,8 +15,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 const API_KEY = process.env.API_KEY || '';
 const MAX_BODY = 256 * 1024;
-// Whole SD file being assembled from the device's pieces (a 10-min ECG is
-// ~0.5 MB); anything larger is refused rather than held in memory.
+// A 10-minute ECG is ~0.5 MB, refuse anything much bigger.
 const MAX_SD_FILE = 8 * 1024 * 1024;
 const SD_UPLOAD_TTL_MS = 10 * 60 * 1000;
 const sdUploads = new Map(); // "device|file" -> { parts: [], size, next, at }
@@ -32,8 +31,7 @@ const MIME = {
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
-  // Explicit Content-Length instead of Node's default chunked encoding -
-  // simpler for the ESP32's HTTP client to consume.
+  // Content-Length instead of chunked, easier for the ESP32 HTTP client.
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
@@ -68,10 +66,7 @@ function serveStatic(req, res) {
   }
   fs.readFile(file, (err, buf) => {
     if (err) return sendJson(res, 404, { error: 'not found' });
-    // No cache headers were being sent at all, which leaves it up to each
-    // browser's own heuristics whether to reuse an old copy of app.js -
-    // explicit no-cache forces a revalidation every load instead, so a
-    // server-side change always shows up on the next refresh.
+    // So a new app.js shows up on the next refresh.
     res.writeHead(200, {
       'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
       'Cache-Control': 'no-cache',
@@ -94,11 +89,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname.startsWith('/api/') && req.method === 'POST') {
-    // X-API-Key guards what the *device* sends (only SD uploads now -
-    // telemetry comes through Azure IoT Hub). The dashboard's own
-    // endpoints (buttons, saving, settings) can't carry a secret from a
-    // browser page, and requiring one there just made every button fail
-    // with 401 as soon as API_KEY was set.
+    // X-API-Key only for what the device sends (SD uploads). Browser
+    // endpoints can't hold a secret.
     const deviceEndpoint = pathname === '/api/sd-upload';
     if (deviceEndpoint && API_KEY && req.headers['x-api-key'] !== API_KEY) {
       return sendJson(res, 401, { error: 'невірний або відсутній X-API-Key' });
@@ -107,9 +99,8 @@ const server = http.createServer(async (req, res) => {
     try { body = await readBody(req); } catch (e) { return sendJson(res, 413, { error: e.message }); }
 
     if (pathname === '/api/sd-upload') {
-      // One piece of a measurement file from the device's SD card. Pieces
-      // arrive in order; on the last one the file becomes history records
-      // and only then does the device delete it from the card.
+      // One part of an SD file. On the last part the file becomes history
+      // records, then the device deletes it from the card.
       const q = reqUrl.searchParams;
       const deviceId = (q.get('device_id') || '').slice(0, 64);
       const file = (q.get('file') || '').slice(0, 64);
@@ -144,8 +135,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/command') {
-      // A dashboard button, sent as an Azure IoT Hub direct method - the
-      // device answers right away whether it will do it.
+      // Dashboard button, sent as a direct method. The device answers right away.
       let parsed;
       try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: 'некоректний JSON' }); }
       const deviceId = String(parsed.device_id ?? '').slice(0, 64);

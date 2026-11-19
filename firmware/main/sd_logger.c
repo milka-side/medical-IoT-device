@@ -20,7 +20,7 @@ static const char *TAG = "sd_logger";
 #define FILE_PREFIX "meas_"
 #define FILE_SUFFIX ".jsonl"
 
-// stdio buffer in front of FATFS: fewer, larger card writes.
+// Bigger stdio buffer = fewer card writes.
 #define WRITE_BUF_SIZE 4096
 
 static spi_host_device_t s_host;
@@ -29,7 +29,7 @@ static sdmmc_card_t *s_card;
 static FILE *s_file;
 static char s_buf[WRITE_BUF_SIZE];
 static int s_next_index = 1;
-static int s_pending = 0; // non-empty measurement files on the card
+static int s_pending = 0; // non-empty files on the card
 
 static bool parse_index(const char *name, int *idx)
 {
@@ -57,8 +57,7 @@ static long file_size(int index)
     return stat(path, &st) == 0 ? (long)st.st_size : -1;
 }
 
-// Walks the measurement files: highest number, lowest number, and how many
-// are non-empty.
+// Highest and lowest file number, and how many are non-empty.
 static void scan(int *highest, int *lowest, int *non_empty)
 {
     *highest = 0;
@@ -87,13 +86,9 @@ static void scan(int *highest, int *lowest, int *non_empty)
     closedir(dir);
 }
 
-// ESP-IDF's card init always probes for SDIO first (CMD52, CMD5). This
-// SDHC card answers those with "illegal command" as it should, but then
-// carries the illegal-command flag over into its reply to the next command
-// (CMD59, CRC on), so the init aborts. A raw probe showed the card fine with
-// the plain memory-card sequence (CMD0/8/59/55/41/58). So the SDIO commands
-// never go out: they're answered locally with ESP_ERR_NOT_SUPPORTED, which
-// sdmmc treats as "not an IO card" in SPI mode.
+// ESP-IDF probes for SDIO first (CMD52/CMD5). This card answers "illegal
+// command" and then fails the next command too, so init aborts. Answer the
+// SDIO commands locally with ESP_ERR_NOT_SUPPORTED instead.
 static esp_err_t do_transaction_no_sdio(int slot, sdmmc_command_t *cmd)
 {
     if (cmd->opcode == 52 || cmd->opcode == 5) { // IO_RW_DIRECT, IO_SEND_OP_COND
@@ -108,7 +103,7 @@ static esp_err_t mount(void)
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = s_host;
     host.do_transaction = do_transaction_no_sdio;
-    // 10 MHz: well inside what jumper-wired modules tolerate.
+    // 10 MHz is fine for jumper wires.
     host.max_freq_khz = 10000;
 
     sdspi_device_config_t slot = SDSPI_DEVICE_CONFIG_DEFAULT();
@@ -116,7 +111,7 @@ static esp_err_t mount(void)
     slot.gpio_cs = s_cs_gpio;
 
     esp_vfs_fat_sdmmc_mount_config_t mount_cfg = {
-        .format_if_mount_failed = false, // never wipe somebody's card
+        .format_if_mount_failed = false, // never format the card
         .max_files = 2,
         .allocation_unit_size = 16 * 1024,
     };
@@ -124,8 +119,7 @@ static esp_err_t mount(void)
     esp_err_t err = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot, &mount_cfg, &s_card);
     if (err != ESP_OK) {
         s_card = NULL;
-        // Keep the (absent or unusable) card deselected so it never reacts
-        // to ADS1293 traffic on the shared bus.
+        // Keep the card deselected so it ignores ADS1293 traffic.
         gpio_set_direction(s_cs_gpio, GPIO_MODE_OUTPUT);
         gpio_set_level(s_cs_gpio, 1);
         if (err == ESP_FAIL) {
@@ -157,8 +151,7 @@ esp_err_t sd_logger_init(spi_host_device_t host, int cs_gpio)
 {
     s_host = host;
     s_cs_gpio = cs_gpio;
-    // A card that was left mid-command (ESP reset while the card stayed
-    // powered) can need more than one CMD0 round to come back.
+    // After an ESP reset the card may need a few CMD0 tries.
     esp_err_t err = ESP_FAIL;
     for (int attempt = 0; attempt < 3 && err != ESP_OK; attempt++) {
         if (attempt > 0) {
@@ -177,14 +170,13 @@ bool sd_logger_is_mounted(void)
 bool sd_logger_reinit(void)
 {
     if (s_file != NULL) {
-        return true; // a file is open - leave the card alone
+        return true; // a file is open
     }
     unmount();
     return mount() == ESP_OK;
 }
 
-// Write error = card pulled or broken: drop it; the next file_begin()
-// tries to mount again.
+// Write error = card pulled or broken, drop it and remount next time.
 static void drop_card(void)
 {
     if (s_file != NULL) {
@@ -234,8 +226,7 @@ bool sd_logger_file_end(void)
     if (s_file == NULL) {
         return false;
     }
-    // fclose flushes and closes the FAT file, which updates its directory
-    // entry (size) - after this the file is complete even if power drops.
+    // fclose updates the file size, after this the file is complete.
     int err = fclose(s_file);
     s_file = NULL;
     if (err != 0) {

@@ -1,19 +1,13 @@
-const DISPLAY_SECONDS = 5; // how much of the trace is drawn on screen
-const SCALE_SECONDS = 20; // how much history the Y-axis autoscale looks at -
-// long enough to stay stable beat-to-beat, short enough that the scale
-// still adapts within a few beats once contact quality changes, instead of
-// a stale spike from a while ago keeping everything looking tiny/flat.
+const DISPLAY_SECONDS = 5; // seconds of trace on screen
+const SCALE_SECONDS = 20; // seconds used for the Y autoscale
 const ALARMS = {
   hr: (v) => v < 50 || v > 120,
   spo2: (v) => v < 92,
-  temp: (v) => v < 35 || v > 37.8, // applied to the estimated body temperature
+  temp: (v) => v < 35 || v > 37.8, // checked against the body estimate
 };
 
-// The device counts as offline once nothing has arrived for this long. While
-// idle it sends one status message a minute to Azure (MIOT_AZURE_IDLE_PERIOD_S
-// = 60, to stay inside the F1 quota), so anything shorter would flag a
-// healthy idle device. During a measurement it sends every second, so a few
-// seconds of silence already mean it's gone.
+// No data for this long = device offline. Idle it sends once a minute,
+// while measuring every second.
 const STALE_MS = 90 * 1000;
 const STALE_MEASURING_MS = 5000;
 
@@ -31,26 +25,21 @@ const banner = $('banner');
 const measureButtons = [...document.querySelectorAll('.measure-btn')];
 
 let fs = 250;
-let ecg = [];       // last DISPLAY_SECONDS, drawn as the line
-let ecgScale = [];  // last SCALE_SECONDS, used only to compute lo/hi
-let scaleLo = -1, scaleHi = 1; // cached, recomputed on new data (not every frame)
+let ecg = [];
+let ecgScale = [];
+let scaleLo = -1, scaleHi = 1; // recomputed on new data, not every frame
 let lastDataAt = 0;
 let wsOpen = false;
 let deviceId = null;
-const lastMeasuredAt = { hr: 0, spo2: 0, temp: 0, ecg: 0 }; // epoch ms, 0 = never measured
-let lastTempBody; // estimated body temperature for the last temperature result
-let lastAdcSps = 0; // ADS1293 samples/s actually delivered, ~800 when nothing is dropped
-// Seconds left in the pulse/SpO2 and temperature windows (undefined = not
-// measuring). Those values only arrive once, as the 3-minute average, when
-// the window ends - meanwhile the tile says when the result will be ready.
+const lastMeasuredAt = { hr: 0, spo2: 0, temp: 0, ecg: 0 }; // epoch ms, 0 = never
+let lastTempBody; // body estimate of the last temperature result
+let lastAdcSps = 0; // real ADC rate, ~800
+// Seconds left in the pulse and temperature windows (undefined = idle).
+// The result only comes when the window ends.
 let measuring = {};
 
-// Robust autoscale: ignore only the most extreme ~0.2% of samples (a 1-2
-// sample motion spike), then pad the range. The previous 3%/97% cut
-// discarded far more than outliers - an R peak is only ~2-4% of a cardiac
-// cycle's samples, so it got clamped flat at roughly half its true height
-// while T waves and noise were stretched up to the same size, which is why
-// real traces looked like noise with peaks "sometimes there".
+// Autoscale: drop the top/bottom ~0.2% (motion spikes), then pad.
+// A 3%/97% cut clipped the R peaks.
 const SCALE_TRIM = 0.002;
 const SCALE_PAD = 0.1;
 
@@ -67,16 +56,12 @@ function fmtMMSS(seconds) {
   return `${m}:${String(s % 60).padStart(2, '0')}`;
 }
 
-// Values persist once measured - they never revert to "--" just because
-// the window closed, so a nurse glancing at the screen later still sees
-// the last reading instead of a blank tile. The "measured at" line is what
-// tells them it's not live right now.
-// The temperature tile shows the measured fingertip temperature; the line
-// under it carries the device's estimate of body temperature, and the
-// alarm colour follows that estimate.
+// Tiles keep the last value after the window closes, the "measured at"
+// line shows it's not live. Temperature tile: fingertip value, body
+// estimate below it, alarm colour follows the estimate.
 function showVitals(d) {
   for (const [key, digits] of [['hr', 0], ['spo2', 0], ['temp', 1]]) {
-    if (d[key] === undefined) continue; // no fresh reading this message - keep showing the last one
+    if (d[key] === undefined) continue; // nothing new, keep the last value
     $(key).textContent = d[key].toFixed(digits);
     lastMeasuredAt[key] = d.received_at || Date.now();
     if (key === 'temp') {
@@ -115,8 +100,7 @@ function refreshAges() {
     const time = new Date(lastMeasuredAt[key]).toLocaleTimeString('uk-UA', {
       hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
-    // Well under ~800 means the device is missing ADC samples, which
-    // distorts the trace's time axis - worth seeing at a glance.
+    // Much less than ~800 means dropped samples.
     const rate = key === 'ecg' && lastAdcSps ? ` · АЦП ${lastAdcSps} Гц` : '';
     const body = key === 'temp' && lastTempBody !== undefined
       ? ` · орієнтовна температура тіла ≈ ${lastTempBody.toFixed(1)} °C` : '';
@@ -124,8 +108,7 @@ function refreshAges() {
   }
 }
 
-// ERROR_LOD from the ADS1293: bit0 = RA, bit1 = LA electrode without skin
-// contact. Only present while ECG is recording.
+// Lead-off bits: bit0 = RA, bit1 = LA. Only sent while ECG runs.
 function showLeadOff(d) {
   const el = $('ecg-lod');
   if (d.lod === undefined) {
@@ -139,27 +122,24 @@ function showLeadOff(d) {
   el.textContent = `Немає контакту електрода: ${off.join(', ')} — перевір, чи щільно прилягає до шкіри`;
 }
 
-// Boot-lockout banner + per-button labels/disabled state, driven entirely
-// by the status/*_remaining_s fields the firmware always sends.
+// Warm-up banner and button states, from status/*_remaining_s.
 function updateControls(d) {
-  // Warm-up after power-on: normal buttons wait, "Виміряти все одно"
-  // (all_force) starts a measurement anyway. A forced measurement can be
-  // running while the warm-up countdown is still going.
+  // During warm-up only "Виміряти все одно" works. A forced measurement
+  // can run while the countdown is still going.
   const lockout = (d.lockout_remaining_s ?? 0) > 0;
   const anyActive = ['ecg', 'vitals', 'temp'].some((k) => d[REMAINING_KEY[k]] !== undefined);
   if (lockout) {
     banner.hidden = false;
     banner.className = 'banner lockout';
     $('banner-text').textContent = `Датчики прогріваються після ввімкнення — точні вимірювання будуть доступні через ${fmtMMSS(d.lockout_remaining_s)}`;
-    $('btn-force').hidden = false; // usable for the whole warm-up, even mid-measurement
+    $('btn-force').hidden = false; // works during the whole warm-up
   } else {
     banner.hidden = true;
   }
   measuring = {
     vitals: d.vitals_remaining_s, temp: d.temp_remaining_s,
   };
-  // While a window runs its result doesn't exist yet - show that instead of
-  // the previous measurement's number.
+  // While the window runs, say so instead of showing the old number.
   if (measuring.vitals !== undefined) {
     for (const k of ['hr', 'spo2']) { $(k).textContent = '…'; $('tile-' + k).classList.remove('alarm'); }
   }
@@ -217,9 +197,7 @@ function drawEcg() {
   const h = (canvas.height = canvas.clientHeight * dpr);
   const ctx = canvas.getContext('2d');
 
-  // Same persistence rule as the vital tiles: a finished measurement keeps
-  // showing its last trace (frozen) instead of going blank - the
-  // ecg-age label under the canvas is what says it's not live anymore.
+  // Keep the last trace after the measurement ends (ecg-age says it's old).
   if (ecg.length < 2) {
     ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--muted');
     ctx.font = `${14 * dpr}px system-ui, -apple-system, sans-serif`;
@@ -254,8 +232,7 @@ function noteData(receivedAt, status) {
   }
 }
 
-// Shows whether the *device* is sending, not just whether this page is
-// connected to the server.
+// Device status, not just the page's connection to the server.
 function updateConnBadge() {
   if (!wsOpen) {
     conn.textContent = 'немає зв\'язку з сервером';
@@ -278,11 +255,10 @@ function updateConnBadge() {
   conn.className = 'conn on';
 }
 
-// "Завантажити дані з SD": enabled only while the device reports saved
-// files on its card and isn't measuring (it can't read the card then).
+// SD button: only when there are files and the device isn't measuring.
 const sdBtn = $('btn-sd');
 let sdFiles = 0;
-let sdUploadUntil = 0; // button held disabled after a press until the device reports back
+let sdUploadUntil = 0; // disabled after a press until the device reports back
 
 function updateSdButton(d) {
   if (d.sd_files !== undefined) {
@@ -340,9 +316,8 @@ function connect() {
     if (m.type === 'snapshot') {
       Object.values(m.devices).forEach(handleDeviceMessage);
     }
-    if (m.type === 'history') loadHistory(); // a record was saved/deleted, possibly from another tab
-    // The server finishes (and saves) a session before announcing it ended,
-    // so this is the moment the pending "will be saved" notice comes true.
+    if (m.type === 'history') loadHistory(); // saved/deleted, maybe in another tab
+    // The server saves the session before it says it ended.
     if (m.type === 'session' && !m.active && pendingSave && m.device_id === deviceId) {
       pendingSave = false;
       setSaveStatus('Вимірювання збережено.');
@@ -389,7 +364,7 @@ for (const btn of [...measureButtons, $('btn-force')]) {
   });
 }
 
-// --- saved records -----------------------------------------------------------
+// --- saved records ---
 
 const KIND_LABELS = { ecg: 'ЕКГ', vitals: 'пульс/SpO₂', temp: 'температура' };
 const TRIGGER_LABELS = { manual: 'вручну', auto: 'авто', sd: 'з SD-картки' };
@@ -416,10 +391,9 @@ function fmtDateTime(ms) {
 }
 
 let saveStatusTimer = null;
-let pendingSave = false; // "save" pressed mid-measurement, waiting for it to finish
+let pendingSave = false; // saved during a measurement, waiting for the end
 
-// Success messages clear themselves after a few seconds; errors and the
-// "will be saved when it finishes" notice stay until replaced.
+// Success messages go away after a few seconds, errors stay.
 function setSaveStatus(text, isError = false, sticky = false) {
   const el = $('save-status');
   el.textContent = text;
@@ -548,7 +522,7 @@ async function deleteRecord(r) {
   if (viewerRec && viewerRec.id === r.id) closeViewer();
 }
 
-// --- record viewer: the saved ECG, 10 s at a time ----------------------------
+// --- record viewer, 10 s per page ---
 
 async function openViewer(id) {
   try {
@@ -560,8 +534,7 @@ async function openViewer(id) {
     return;
   }
   const { samples, fs: recFs } = viewerRec.ecg;
-  // One fixed scale for the whole recording, so scrolling doesn't make the
-  // trace jump in size from one 10 s window to the next.
+  // One scale for the whole record, so pages don't jump in size.
   const [lo, hi] = percentileRange(samples, SCALE_TRIM);
   const pad = (hi - lo) * SCALE_PAD;
   viewerRec.lo = lo - pad;
@@ -616,7 +589,7 @@ window.addEventListener('resize', drawViewer);
 loadHistory();
 connect();
 setInterval(updateConnBadge, 1000);
-setInterval(refreshAges, 1000); // keeps "X тому" live between messages, not just on arrival
+setInterval(refreshAges, 1000); // keeps "X тому" ticking
 (function loop() {
   drawEcg();
   requestAnimationFrame(loop);

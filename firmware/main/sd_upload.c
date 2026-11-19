@@ -10,14 +10,12 @@
 
 static const char *TAG = "sd_upload";
 
-// Piece size per HTTP request: big enough that a 10-minute ECG (~0.5 MB) is
-// ~60 requests, small enough to sit in RAM next to Wi-Fi.
+// 8 KB per request, a 10-minute ECG is ~60 requests.
 #define PART_SIZE 8192
 
-// Guard against a file that keeps failing to delete being sent forever.
+// So a file that can't be deleted isn't sent forever.
 #define MAX_FILES_PER_RUN 200
 
-// Server response: small ({"ok":true,...}), anything past it is dropped.
 static char s_resp[256];
 static size_t s_resp_len;
 
@@ -33,16 +31,12 @@ static esp_err_t on_http_event(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-// Sends one piece of a measurement file to web/server.js POST /api/sd-upload.
-// Pieces go in order (part 0, 1, ...); `last` marks the final one, after
-// which the server turns the whole file into saved history records.
-// boot_id/uptime_s let the server work out when the measurement happened if
-// the file carries no wall-clock time. ESP_OK only once the server confirmed.
+// Sends one part to POST /api/sd-upload. Parts go in order, `last` ends the
+// file. boot_id/uptime_s let the server date it. ESP_OK once confirmed.
 static esp_err_t upload_part(const char *file_name, int part, bool last, uint32_t boot_id, long long uptime_s,
                              const char *data, size_t len)
 {
-    // CONFIG_MIOT_SERVER_URL is "http://host:port" (anything from "/api/"
-    // on is ignored, so an old ".../api/data" value still works).
+    // Only host:port is used, anything from "/api/" on is dropped.
     const char *base = CONFIG_MIOT_SERVER_URL;
     const char *api = strstr(base, "/api/");
     int base_len = api ? (int)(api - base) : (int)strlen(base);
@@ -136,7 +130,7 @@ bool sd_upload_all(uint32_t boot_id)
             return true;
         }
         if (size < 0) {
-            return false; // can't even stat it - leave it alone
+            return false; // can't stat it, leave it
         }
         if (size > 0 && !upload_file(index, size, boot_id)) {
             ESP_LOGW(TAG, "upload stopped - the remaining files stay on the card");

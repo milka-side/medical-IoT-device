@@ -1,5 +1,4 @@
-// @azure/event-hubs calls globalThis.crypto.randomUUID(), which Node only
-// provides globally from v19 - on Node 18 the server crashed at startup.
+// event-hubs needs globalThis.crypto, Node 18 doesn't have it.
 if (!globalThis.crypto) globalThis.crypto = require('crypto').webcrypto;
 const { EventHubConsumerClient } = require('@azure/event-hubs');
 
@@ -20,8 +19,7 @@ function startAzureIngest(hub) {
       for (const event of events) {
         let data;
         try {
-          // Body arrives as a string, an already-parsed object, or raw bytes
-          // (Buffer/Uint8Array) depending on the message's content type.
+          // Body can be a string, an object or raw bytes.
           let body = event.body;
           if (body instanceof Uint8Array) body = Buffer.from(body).toString('utf8');
           data = typeof body === 'string' ? JSON.parse(body) : body;
