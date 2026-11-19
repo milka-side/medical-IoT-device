@@ -9,7 +9,12 @@ const ALARMS = {
   temp: (v) => v < 35 || v > 37.8, // applied to the estimated body temperature
 };
 
-const STALE_MS = 5000;
+// While idle the device sends one status a minute through Azure (F1 quota),
+// during a measurement one message a second - so silence means "gone"
+// after 90 s when idle but after a few seconds mid-measurement.
+const STALE_MS = 90 * 1000;
+const STALE_MEASURING_MS = 5000;
+let lastStatus = '';
 
 const MEASURE_LABELS = {
   ecg: 'Виміряти ЕКГ',
@@ -239,8 +244,11 @@ function drawEcg() {
 
 const conn = $('conn');
 
-function noteData(receivedAt) {
-  if (receivedAt && receivedAt > lastDataAt) lastDataAt = receivedAt;
+function noteData(receivedAt, status) {
+  if (receivedAt && receivedAt > lastDataAt) {
+    lastDataAt = receivedAt;
+    if (status) lastStatus = status;
+  }
 }
 
 function updateConnBadge() {
@@ -249,9 +257,10 @@ function updateConnBadge() {
     conn.className = 'conn off';
     return;
   }
-  if (lastDataAt && Date.now() - lastDataAt > STALE_MS) {
+  const stale = lastStatus === 'measuring' ? STALE_MEASURING_MS : STALE_MS;
+  if (lastDataAt && Date.now() - lastDataAt > stale) {
     const sec = Math.round((Date.now() - lastDataAt) / 1000);
-    conn.textContent = `немає даних (${sec}с)`;
+    conn.textContent = `немає даних (${sec < 120 ? `${sec} с` : `${Math.round(sec / 60)} хв`})`;
     conn.className = 'conn warn';
     return;
   }
@@ -309,7 +318,7 @@ function handleDeviceMessage(d) {
   updateControls(d);
   updateSdButton(d);
   showLeadOff(d);
-  noteData(d.received_at);
+  noteData(d.received_at, d.status);
 }
 
 function connect() {
