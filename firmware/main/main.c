@@ -8,9 +8,7 @@
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
-#include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
-#include "esp_pm.h"
 #include "esp_netif_sntp.h"
 #include "esp_random.h"
 #include "esp_system.h"
@@ -34,13 +32,6 @@
 #include "wifi_connect.h"
 
 static const char *TAG = "main";
-
-// TEMP DIAGNOSTIC: Wi-Fi disabled to test whether its radio is a noise
-// source for the ADS1293 analog front end (both radiated pickup and
-// supply-rail current spikes during TX are documented on ESP32 boards).
-// Observe raw/filtered ECG over USB serial instead, since there's no
-// network to POST over. Flip back to 0 to restore normal operation.
-#define WIFI_DISABLED_FOR_TEST 0
 
 #define ECG_QUEUE_LEN    2048
 #define ECG_DRAIN_MAX    2048
@@ -75,8 +66,7 @@ static volatile bool s_temp_active = false;
 
 // Window end times on the esp_timer clock. Real-time deadlines rather than
 // counting loop iterations: each sender iteration is 1 s of sleep *plus*
-// however long the command poll and telemetry POST took, so counting
-// iterations stretched "10 minutes" by however slow the network was.
+// however long the telemetry POST took.
 // Sender-task only, so the non-atomic 64-bit access is fine.
 static int64_t s_ecg_deadline_us, s_vitals_deadline_us, s_temp_deadline_us;
 
@@ -123,8 +113,7 @@ static float s_window_room_c = NAN; // room temperature when the window opened
 static bool s_vitals_result_pending, s_temp_result_pending;
 
 // ADS1293's actual output rate (800 sps with the current R2/R3) is far
-// denser than a dashboard chart needs, and was making the line look like a
-// fuzzy band just from too many points per pixel column. The signal is
+// denser than a dashboard chart needs. The signal is
 // already low-pass filtered to ~40 Hz inside ads1293_read_sample, but that
 // filter is a single IIR pole (-20 dB/decade) - at the decimated Nyquist
 // (800/4/2 = 100 Hz) it's only attenuated a few dB, so mains/muscle
@@ -137,9 +126,7 @@ static bool s_vitals_result_pending, s_temp_result_pending;
 #define ECG_DECIMATION 4 // 800 sps / 4 = 200 Hz output
 
 // Fixed by the ADS1293 crystal and R1/R2/R3, not by how often we happen to
-// send - so it's reported as-is instead of measured per batch (a partial
-// first/last batch of a window used to come out as e.g. "30 Hz" and the
-// dashboard then stretched that batch across the whole chart).
+// send - so it's reported as-is instead of measured per batch.
 #define ECG_RAW_SPS (102400.0 / (4 * 4 * 8))
 #define ECG_OUT_FS  (ECG_RAW_SPS / ECG_DECIMATION)
 
@@ -201,7 +188,7 @@ static void ecg_task(void *arg)
             decim_counter = 0;
             decim_sum = 0;
 
-#if WIFI_DISABLED_FOR_TEST || defined(CONFIG_MIOT_CALIBRATION_MODE)
+#ifdef CONFIG_MIOT_CALIBRATION_MODE
             // Plain printf (not ESP_LOGI) so it's easy to grep/parse out of
             // the serial log - the only ECG path when Wi-Fi is off.
             printf("ECG,%ld\n", (long)avg);
@@ -228,25 +215,6 @@ static void ppg_task(void *arg)
         if (want != running) {
             if (want) {
                 max30102_start();
-#ifdef CONFIG_MIOT_CALIBRATION_MODE
-                // LED identity test: 10 s LED1 only, 10 s LED2 only, then
-                // both. Whichever phase shows the visible red glow is the red
-                // LED. Polling continues so the levels are logged too.
-                static const struct {
-                    const char *name;
-                    uint8_t led1, led2;
-                } phases[] = {{"LED1_ONLY", 0x24, 0x00}, {"LED2_ONLY", 0x00, 0x24}};
-                for (int p = 0; p < 2; p++) {
-                    printf("LEDTEST,%s\n", phases[p].name);
-                    max30102_set_led_currents(phases[p].led1, phases[p].led2);
-                    for (int i = 0; i < 1000; i++) { // 10 s
-                        max30102_poll();
-                        vTaskDelay(pdMS_TO_TICKS(10));
-                    }
-                }
-                printf("LEDTEST,BOTH\n");
-                max30102_set_led_currents(0x24, 0x24);
-#endif
             } else {
                 max30102_stop();
             }
@@ -375,7 +343,7 @@ static int remaining_s(int64_t deadline_us, int64_t now_us)
         return 0;
     }
     if (left >= (int64_t)INT32_MAX * US_PER_S) {
-        return INT32_MAX; // "forever" window (WIFI_DISABLED_FOR_TEST)
+        return INT32_MAX; // "forever" window (calibration mode)
     }
     return (int)((left + US_PER_S - 1) / US_PER_S);
 }
@@ -452,86 +420,8 @@ static bool temp_window_result(float *out_skin, int *out_settled_after_s)
     return true;
 }
 
-// Power management (CONFIG_PM_ENABLE): when nothing is being measured the
-// CPU drops to 40 MHz and, with CONFIG_MIOT_LIGHT_SLEEP, the chip light-
-// sleeps between the once-a-second telemetry posts (Wi-Fi modem-sleep keeps
-// the association alive meanwhile). These locks are held only while an ECG
-// or pulse window is open: ECG needs every DRDY interrupt at 800 Hz on time
-// and full CPU speed for the filter chain, and MAX30102 is polled every 10 ms.
-static esp_pm_lock_handle_t s_pm_no_sleep, s_pm_cpu_max;
-// Separate pair held while a computer is attached over USB: idle DFS/light
-// sleep made the USB Serial/JTAG port stop responding (flashing failed with
-// "Protocol error" until the chip was put in download mode by hand), even
-// with CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION. On battery nothing is attached
-// and the savings apply as before.
-static esp_pm_lock_handle_t s_pm_usb_no_sleep, s_pm_usb_cpu_max;
-
-static void power_init(void)
-{
-#if CONFIG_PM_ENABLE
-    esp_pm_config_t pm = {
-        .max_freq_mhz = 160,
-        .min_freq_mhz = 40,
-#ifdef CONFIG_MIOT_LIGHT_SLEEP
-        .light_sleep_enable = true,
-#else
-        .light_sleep_enable = false,
-#endif
-    };
-    esp_err_t err = esp_pm_configure(&pm);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "esp_pm_configure failed: %s - running without power management", esp_err_to_name(err));
-    }
-    esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "measuring", &s_pm_no_sleep);
-    esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "measuring", &s_pm_cpu_max);
-    esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb_host", &s_pm_usb_no_sleep);
-    esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "usb_host", &s_pm_usb_cpu_max);
-    // Take them right away: at boot the board is usually still on the USB
-    // cable it was just flashed over. update_usb_power() releases them
-    // within a second if nothing is actually attached.
-    if (s_pm_usb_no_sleep && s_pm_usb_cpu_max) {
-        esp_pm_lock_acquire(s_pm_usb_no_sleep);
-        esp_pm_lock_acquire(s_pm_usb_cpu_max);
-    }
-#endif
-}
-
-static void power_set_measuring(bool measuring)
-{
-    if (s_pm_no_sleep == NULL || s_pm_cpu_max == NULL) {
-        return; // power management not enabled in this build
-    }
-    if (measuring) {
-        esp_pm_lock_acquire(s_pm_no_sleep);
-        esp_pm_lock_acquire(s_pm_cpu_max);
-    } else {
-        esp_pm_lock_release(s_pm_cpu_max);
-        esp_pm_lock_release(s_pm_no_sleep);
-    }
-}
-
-// Keeps the chip fully awake while a USB host is attached (see s_pm_usb_*).
-static void update_usb_power(void)
-{
-    static bool held = true; // acquired in power_init()
-    if (s_pm_usb_no_sleep == NULL || s_pm_usb_cpu_max == NULL) {
-        return;
-    }
-    bool attached = usb_serial_jtag_is_connected();
-    if (attached != held) {
-        held = attached;
-        if (attached) {
-            esp_pm_lock_acquire(s_pm_usb_no_sleep);
-            esp_pm_lock_acquire(s_pm_usb_cpu_max);
-        } else {
-            esp_pm_lock_release(s_pm_usb_cpu_max);
-            esp_pm_lock_release(s_pm_usb_no_sleep);
-        }
-    }
-}
-
-// Brings radio / CPU power state in line with which windows are open.
-static void update_power_state(bool *wifi_ps_on, bool *power_measuring)
+// Brings the radio's power state in line with which windows are open.
+static void update_power_state(bool *wifi_ps_on)
 {
     // Modem-sleep (ESP-IDF's default for STA) wakes the radio every beacon
     // interval, ~102 ms - those periodic current pulses land at ~10 Hz,
@@ -540,30 +430,6 @@ static void update_power_state(bool *wifi_ps_on, bool *power_measuring)
     if (s_ecg_active == *wifi_ps_on) {
         *wifi_ps_on = !s_ecg_active;
         wifi_connect_set_power_save(*wifi_ps_on);
-    }
-    bool measuring = s_ecg_active || s_vitals_active;
-    if (measuring != *power_measuring) {
-        *power_measuring = measuring;
-        power_set_measuring(measuring);
-    }
-}
-
-static const char *reset_reason_str(esp_reset_reason_t r)
-{
-    switch (r) {
-    case ESP_RST_POWERON:   return "power-on";
-    case ESP_RST_EXT:       return "external pin";
-    case ESP_RST_SW:        return "software restart";
-    case ESP_RST_PANIC:     return "PANIC (crash)";
-    case ESP_RST_INT_WDT:   return "interrupt watchdog";
-    case ESP_RST_TASK_WDT:  return "task watchdog";
-    case ESP_RST_WDT:       return "other watchdog";
-    case ESP_RST_DEEPSLEEP: return "deep sleep wake";
-    case ESP_RST_BROWNOUT:  return "BROWNOUT (supply voltage dropped)";
-    case ESP_RST_SDIO:      return "SDIO";
-    case ESP_RST_USB:       return "USB (flashing/monitor)";
-    case ESP_RST_JTAG:      return "JTAG";
-    default:                return "unknown";
     }
 }
 
@@ -577,12 +443,10 @@ static const char *reset_reason_str(esp_reset_reason_t r)
 
 static TaskHandle_t s_sender_task;
 static volatile bool s_button_pressed;
-static volatile uint32_t s_button_irqs; // diagnostic: ISR hits since boot
 
 static void button_isr(void *arg)
 {
     gpio_intr_disable(PIN_BUTTON);
-    s_button_irqs++;
     s_button_pressed = true;
     BaseType_t woken = pdFALSE;
     if (s_sender_task != NULL) {
@@ -671,7 +535,6 @@ static void sender_loop(void)
 {
     int32_t *ecg_batch = malloc(ECG_DRAIN_MAX * sizeof(int32_t));
     bool wifi_ps_on = true;
-    bool power_measuring = false;
     bool in_session = false;       // a measurement is running (or just ended this tick)
     int idle_ticks = 0;            // consecutive ticks with every window closed
     int64_t next_copy_try_us = 0;  // SD copy retry throttle (no card, write error)
@@ -691,7 +554,7 @@ static void sender_loop(void)
             } else {
                 ESP_LOGI(TAG, "button %s - measuring everything", force ? "pressed twice" : "pressed");
                 apply_command(MEASURE_ALL, esp_timer_get_time());
-                update_power_state(&wifi_ps_on, &power_measuring);
+                update_power_state(&wifi_ps_on);
             }
         }
 
@@ -717,19 +580,9 @@ static void sender_loop(void)
         }
         button_rearm_pending();
 
-        static int s_rst_log_tick;
-        if (++s_rst_log_tick >= 10) {
-            s_rst_log_tick = 0;
-            ESP_LOGW(TAG, "uptime %lld s, last reset: %s, free heap %lu, button pin=%d irqs=%lu",
-                     esp_timer_get_time() / US_PER_S, reset_reason_str(esp_reset_reason()),
-                     (unsigned long)esp_get_free_heap_size(), gpio_get_level(PIN_BUTTON),
-                     (unsigned long)s_button_irqs);
-        }
-
         bool boot_lockout = esp_timer_get_time() < BOOT_LOCKOUT_S * US_PER_S;
         close_expired_windows(esp_timer_get_time()); // also forced windows during the lockout
-        update_power_state(&wifi_ps_on, &power_measuring);
-        update_usb_power();
+        update_power_state(&wifi_ps_on);
 
         int n = 0;
         int32_t v;
@@ -922,7 +775,7 @@ static void sender_loop(void)
                 ESP_LOGW(TAG, "measurement requested during the warm-up lockout - ignored");
             } else {
                 apply_command(cmds, esp_timer_get_time());
-                update_power_state(&wifi_ps_on, &power_measuring);
+                update_power_state(&wifi_ps_on);
             }
         }
     }
@@ -930,10 +783,6 @@ static void sender_loop(void)
 
 void app_main(void)
 {
-    // Why did we (re)start? Printed again every 10 s from the send loop, so
-    // it can still be read after attaching to the serial port late.
-    ESP_LOGW(TAG, "reset reason: %s", reset_reason_str(esp_reset_reason()));
-
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -941,13 +790,12 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
-    power_init();
     s_ecg_queue = xQueueCreate(ECG_QUEUE_LEN, sizeof(int32_t));
 
     // Wi-Fi: block here until connected or the quick retries run out -
     // after that wifi_connect keeps retrying every 10 s in the background,
     // and POSTs are just skipped while it's down.
-#if !WIFI_DISABLED_FOR_TEST && !defined(CONFIG_MIOT_CALIBRATION_MODE)
+#ifndef CONFIG_MIOT_CALIBRATION_MODE
     if (wifi_connect_start() != ESP_OK) {
         ESP_LOGW(TAG, "starting without Wi-Fi; will keep retrying in background");
     }
@@ -960,7 +808,7 @@ void app_main(void)
     esp_netif_sntp_init(&sntp_cfg);
 #endif
 #else
-    ESP_LOGW(TAG, "Wi-Fi intentionally disabled for noise-source test - no network, watch serial log");
+    ESP_LOGW(TAG, "calibration mode: Wi-Fi off, watch the serial log");
 #endif
 
     // Shared I2C bus: TMP117 + MAX30102.
@@ -1012,14 +860,6 @@ void app_main(void)
         ESP_LOGW(TAG, "Azure IoT Hub telemetry init failed; continuing without it");
     }
 
-#if WIFI_DISABLED_FOR_TEST
-    // No network -> no command channel to wait on, so force ECG on
-    // permanently (bypassing the boot lockout too) for the offline
-    // noise-source diagnostic this flag exists for. ecg_task powers the
-    // AFE up as soon as it sees the flag.
-    s_ecg_deadline_us = INT64_MAX;
-    s_ecg_active = true;
-#endif
 #ifdef CONFIG_MIOT_CALIBRATION_MODE
     ESP_LOGW(TAG, "CALIBRATION MODE: all sensors always on, raw values on serial");
     s_ecg_deadline_us = s_vitals_deadline_us = s_temp_deadline_us = INT64_MAX;

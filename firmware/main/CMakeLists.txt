@@ -23,8 +23,6 @@ idf_component_register(
         mbedtls
         driver
         esp_timer
-        esp_pm
-        esp_driver_usb_serial_jtag
         fatfs
         esp_driver_sdspi
         esp_partition

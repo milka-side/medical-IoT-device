@@ -81,18 +81,6 @@ menu "Medical IoT Device"
             and ECG,<sample> lines at 200 Hz. Wi-Fi stays off (no network noise).
             Never leave this on in a normal build.
 
-    config MIOT_LIGHT_SLEEP
-        bool "Light-sleep between telemetry posts when nothing is measured"
-        depends on PM_ENABLE
-        default y
-        help
-            With power management enabled the CPU already drops to 40 MHz
-            when idle; this additionally lets the chip light-sleep between
-            the once-a-second posts while no ECG/pulse window is open.
-            While the USB Serial/JTAG port is plugged into a computer the
-            chip stays awake anyway (USJ_NO_AUTO_LS_ON_CONNECTION), so
-            flashing and the serial monitor keep working.
-
     config MIOT_MQTT_ENABLE
         bool "Also publish telemetry over MQTT"
         default n

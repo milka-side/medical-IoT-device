@@ -147,7 +147,7 @@ bool wifi_connect_is_up(void)
 void wifi_connect_set_power_save(bool enable)
 {
     if (!s_started) {
-        return; // Wi-Fi never initialised (e.g. WIFI_DISABLED_FOR_TEST)
+        return; // Wi-Fi never initialised (calibration mode)
     }
     esp_wifi_set_ps(enable ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
 }
