@@ -6,7 +6,9 @@ const SCALE_SECONDS = 20; // how much history the Y-axis autoscale looks at -
 const ALARMS = {
   hr: (v) => v < 50 || v > 120,
   spo2: (v) => v < 92,
-  temp: (v) => v < 35 || v > 37.8, // applied to the estimated body temperature
+  // Measured fingertip temperature: a healthy finger is often well below
+  // 35 °C, so only a high reading is flagged.
+  temp: (v) => v > 37.8,
 };
 
 const STALE_MS = 5000;
@@ -32,7 +34,6 @@ let lastDataAt = 0;
 let wsOpen = false;
 let deviceId = null;
 const lastMeasuredAt = { hr: 0, spo2: 0, temp: 0, ecg: 0 }; // epoch ms, 0 = never measured
-let lastTempBody; // estimated body temperature for the last temperature result
 let lastAdcSps = 0; // ADS1293 samples/s actually delivered, ~800 when nothing is dropped
 // Seconds left in the pulse/SpO2 and temperature windows (undefined = not
 // measuring). Those values only arrive once, as the 3-minute average, when
@@ -65,20 +66,13 @@ function fmtMMSS(seconds) {
 // the window closed, so a nurse glancing at the screen later still sees
 // the last reading instead of a blank tile. The "measured at" line is what
 // tells them it's not live right now.
-// The temperature tile shows the measured fingertip temperature; the line
-// under it carries the device's estimate of body temperature, and the
-// alarm colour follows that estimate.
+// The temperature tile shows the measured fingertip temperature.
 function showVitals(d) {
   for (const [key, digits] of [['hr', 0], ['spo2', 0], ['temp', 1]]) {
     if (d[key] === undefined) continue; // no fresh reading this message - keep showing the last one
     $(key).textContent = d[key].toFixed(digits);
     lastMeasuredAt[key] = d.received_at || Date.now();
-    if (key === 'temp') {
-      lastTempBody = d.temp_body;
-      $('tile-temp').classList.toggle('alarm', lastTempBody !== undefined && ALARMS.temp(lastTempBody));
-    } else {
-      $('tile-' + key).classList.toggle('alarm', ALARMS[key](d[key]));
-    }
+    $('tile-' + key).classList.toggle('alarm', ALARMS[key](d[key]));
   }
   refreshAges();
 }
@@ -112,9 +106,7 @@ function refreshAges() {
     // Well under ~800 means the device is missing ADC samples, which
     // distorts the trace's time axis - worth seeing at a glance.
     const rate = key === 'ecg' && lastAdcSps ? ` · АЦП ${lastAdcSps} Гц` : '';
-    const body = key === 'temp' && lastTempBody !== undefined
-      ? ` · орієнтовна температура тіла ≈ ${lastTempBody.toFixed(1)} °C` : '';
-    el.textContent = `о ${time} (${fmtAgo(now - lastMeasuredAt[key])})${rate}${body}`;
+    el.textContent = `о ${time} (${fmtAgo(now - lastMeasuredAt[key])})${rate}`;
   }
 }
 
@@ -425,8 +417,7 @@ function recordValues(r) {
   if (typeof r.hr === 'number') parts.push(`пульс ${r.hr} уд/хв`);
   if (typeof r.spo2 === 'number') parts.push(`SpO₂ ${r.spo2}%`);
   if (typeof r.temp === 'number') {
-    parts.push(typeof r.temp_body === 'number'
-      ? `${r.temp.toFixed(1)} °C (тіло ≈ ${r.temp_body.toFixed(1)} °C)` : `${r.temp.toFixed(1)} °C`);
+    parts.push(`${r.temp.toFixed(1)} °C`);
   }
   if (r.ecg_seconds) parts.push(`ЕКГ ${fmtMMSS(r.ecg_seconds)}`);
   return parts.join(' · ') || 'без даних';
