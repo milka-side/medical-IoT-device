@@ -23,9 +23,14 @@
 // Call once from app_main after wifi_connect_start().
 esp_err_t telemetry_azure_init(void);
 
-// Publishes a telemetry JSON body to devices/<deviceId>/messages/events/
-// (QoS 0). It reaches the dashboard via the hub's built-in Event
-// Hub-compatible endpoint (web/src/azure-ingest.js).
+// Publishes a telemetry JSON body to devices/<deviceId>/messages/events/.
+// It reaches the dashboard via the hub's built-in Event Hub-compatible
+// endpoint (web/src/azure-ingest.js).
+//
+// `reliable` = measurement data: sent with QoS 1, the hub acknowledges it,
+// and *out_msg_id gets the id to ask telemetry_azure_msg_state() about.
+// Otherwise (status messages) QoS 0 and *out_msg_id = 0. *out_msg_id is
+// also 0 when the message was skipped by the throttle below.
 //
 // `idle` = nothing in this message the dashboard doesn't already have (no
 // ECG samples, no result, no state change). Such messages go out at most
@@ -34,7 +39,18 @@ esp_err_t telemetry_azure_init(void);
 // Returns ESP_ERR_INVALID_STATE while not connected to the hub (and
 // ESP_ERR_NOT_SUPPORTED when Azure is disabled), so the caller can keep
 // measurement data for the SD card instead.
-esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle);
+esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle, bool reliable, int *out_msg_id);
+
+// Fate of a QoS 1 message: still waiting for the hub's acknowledgement,
+// acknowledged, or given up by the MQTT client (not acknowledged within
+// CONFIG_MQTT_OUTBOX_EXPIRED_TIMEOUT_MS, retries included) - only then is it
+// safe to keep a copy for the SD card without risking a duplicate.
+typedef enum {
+    AZURE_MSG_PENDING,
+    AZURE_MSG_DELIVERED,
+    AZURE_MSG_LOST,
+} azure_msg_state_t;
+azure_msg_state_t telemetry_azure_msg_state(int msg_id);
 
 // Dashboard commands over Azure IoT Hub direct methods: the server calls
 // method "command" with payload {"commands":["all"]} (same format as the

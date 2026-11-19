@@ -37,6 +37,34 @@ static char s_topic[192];
 
 static esp_mqtt_client_handle_t s_client;
 static volatile bool s_connected;
+
+// Ids of recent QoS 1 messages the hub acknowledged (MQTT_EVENT_PUBLISHED)
+// or the client gave up on (MQTT_EVENT_DELETED). Written on the MQTT task,
+// read by the sender task; the sender checks every second and only a few
+// messages are in flight, so a short ring is plenty.
+#define MSG_RING 32
+static portMUX_TYPE s_msg_mux = portMUX_INITIALIZER_UNLOCKED;
+static int s_acked[MSG_RING], s_acked_head;
+static int s_lost[MSG_RING], s_lost_head;
+
+static void ring_push(int *ring, int *head, int msg_id)
+{
+    portENTER_CRITICAL(&s_msg_mux);
+    ring[*head] = msg_id;
+    *head = (*head + 1) % MSG_RING;
+    portEXIT_CRITICAL(&s_msg_mux);
+}
+
+static bool ring_has(const int *ring, int msg_id)
+{
+    bool found = false;
+    portENTER_CRITICAL(&s_msg_mux);
+    for (int i = 0; i < MSG_RING && !found; i++) {
+        found = ring[i] == msg_id;
+    }
+    portEXIT_CRITICAL(&s_msg_mux);
+    return found;
+}
 static azure_command_handler_t s_command_handler;
 
 // Direct methods: IoT Hub delivers calls on $iothub/methods/POST/<name>/?$rid=<id>
@@ -222,6 +250,13 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             handle_method(event->topic, event->topic_len, event->data, event->data_len);
         }
         break;
+    case MQTT_EVENT_PUBLISHED:
+        ring_push(s_acked, &s_acked_head, event->msg_id);
+        break;
+    case MQTT_EVENT_DELETED:
+        ring_push(s_lost, &s_lost_head, event->msg_id);
+        ESP_LOGW(TAG, "message %d not acknowledged by the hub - kept for the SD card", event->msg_id);
+        break;
     case MQTT_EVENT_DISCONNECTED:
         s_connected = false;
         ESP_LOGW(TAG, "disconnected from Azure IoT Hub");
@@ -323,8 +358,9 @@ esp_err_t telemetry_azure_init(void)
     return ESP_OK;
 }
 
-esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle)
+esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle, bool reliable, int *out_msg_id)
 {
+    *out_msg_id = 0;
     if (!s_connected) {
         return ESP_ERR_INVALID_STATE; // caller keeps measurement data for the SD card
     }
@@ -332,12 +368,23 @@ esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle)
     if (idle && now - s_last_idle_us < (int64_t)CONFIG_MIOT_AZURE_IDLE_PERIOD_S * 1000000) {
         return ESP_OK; // the dashboard already has this state; next status in a while
     }
-    int msg_id = esp_mqtt_client_publish(s_client, s_topic, json_body, (int)len, /*qos=*/0, /*retain=*/0);
+    int msg_id = esp_mqtt_client_publish(s_client, s_topic, json_body, (int)len, reliable ? 1 : 0, /*retain=*/0);
     if (msg_id < 0) {
         return ESP_FAIL;
     }
     s_last_idle_us = now; // any message restarts the "one a minute" timer
+    if (reliable) {
+        *out_msg_id = msg_id;
+    }
     return ESP_OK;
+}
+
+azure_msg_state_t telemetry_azure_msg_state(int msg_id)
+{
+    if (ring_has(s_acked, msg_id)) {
+        return AZURE_MSG_DELIVERED;
+    }
+    return ring_has(s_lost, msg_id) ? AZURE_MSG_LOST : AZURE_MSG_PENDING;
 }
 
 #else // !CONFIG_MIOT_AZURE_ENABLE
@@ -348,12 +395,20 @@ esp_err_t telemetry_azure_init(void)
     return ESP_OK;
 }
 
-esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle)
+esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle, bool reliable, int *out_msg_id)
 {
     (void)json_body;
     (void)len;
     (void)idle;
+    (void)reliable;
+    *out_msg_id = 0;
     return ESP_ERR_NOT_SUPPORTED; // nothing is sent anywhere - measurements go to the SD card
+}
+
+azure_msg_state_t telemetry_azure_msg_state(int msg_id)
+{
+    (void)msg_id;
+    return AZURE_MSG_LOST;
 }
 
 void telemetry_azure_set_command_handler(azure_command_handler_t handler)

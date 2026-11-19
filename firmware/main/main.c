@@ -529,6 +529,70 @@ static measure_cmd_t take_remote_commands(void)
     return c;
 }
 
+// Measurement messages sent to Azure with QoS 1 whose acknowledgement hasn't
+// arrived yet. A copy is kept until the hub acknowledges it, or until the
+// MQTT client gives up on it (MQTT_EVENT_DELETED, after its own retries) -
+// then the copy goes to the SD buffer. Waiting for the client to give up,
+// rather than our own timeout, means a message never ends up both on the
+// dashboard and on the SD card. Sender task only.
+#define PENDING_MAX 24
+// Safety net in case the "given up" event never comes (e.g. the client was
+// restarted): well past the client's outbox expiry.
+#define PENDING_GIVE_UP_US ((int64_t)(CONFIG_MQTT_OUTBOX_EXPIRED_TIMEOUT_MS + 10000) * 1000)
+
+typedef struct {
+    int msg_id;
+    int64_t sent_us;
+    char *json;
+    size_t len;
+} pending_msg_t;
+
+static pending_msg_t s_pending[PENDING_MAX];
+static int s_pending_n;
+
+static void pending_keep_for_sd(pending_msg_t *m)
+{
+    offline_log_append(m->json, m->len);
+    free(m->json);
+    m->json = NULL;
+}
+
+static void pending_add(int msg_id, const char *json, size_t len)
+{
+    if (s_pending_n == PENDING_MAX) {
+        // Hub has been silent for a long while: stop waiting for the oldest.
+        pending_keep_for_sd(&s_pending[0]);
+        memmove(&s_pending[0], &s_pending[1], (PENDING_MAX - 1) * sizeof(s_pending[0]));
+        s_pending_n--;
+    }
+    char *copy = malloc(len);
+    if (copy == NULL) {
+        ESP_LOGE(TAG, "OOM keeping message %d for acknowledgement", msg_id);
+        return;
+    }
+    memcpy(copy, json, len);
+    s_pending[s_pending_n++] = (pending_msg_t){.msg_id = msg_id, .sent_us = esp_timer_get_time(), .json = copy, .len = len};
+}
+
+// Drops acknowledged messages, moves given-up ones to the SD buffer.
+static void pending_resolve(void)
+{
+    int64_t now = esp_timer_get_time();
+    int kept = 0;
+    for (int i = 0; i < s_pending_n; i++) {
+        pending_msg_t *m = &s_pending[i];
+        azure_msg_state_t st = telemetry_azure_msg_state(m->msg_id);
+        if (st == AZURE_MSG_DELIVERED) {
+            free(m->json);
+        } else if (st == AZURE_MSG_LOST || now - m->sent_us > PENDING_GIVE_UP_US) {
+            pending_keep_for_sd(m);
+        } else {
+            s_pending[kept++] = *m;
+        }
+    }
+    s_pending_n = kept;
+}
+
 static void sender_loop(void)
 {
     int32_t *ecg_batch = malloc(ECG_DRAIN_MAX * sizeof(int32_t));
@@ -732,8 +796,15 @@ static void sender_loop(void)
                         (boot_lockout ? 8 : 0);
             bool changed = state != sent_state || t.sd_files != sent_sd_files || t.temp_ok || t.vitals_ok;
             bool throttle = !s_ecg_active && !changed;
-            if (telemetry_azure_publish(json, len, throttle) == ESP_OK) {
+            // Measurement data goes with QoS 1 and counts as delivered only
+            // once the hub acknowledges it (pending_resolve); status messages
+            // go with QoS 0.
+            int msg_id = 0;
+            if (telemetry_azure_publish(json, len, throttle, log_this_line, &msg_id) == ESP_OK) {
                 delivered = true;
+                if (msg_id > 0) {
+                    pending_add(msg_id, json, len);
+                }
                 sent_state = state;
                 sent_sd_files = t.sd_files;
             } else if (log_this_line) {
@@ -752,7 +823,8 @@ static void sender_loop(void)
         // card can't be written while the ADS1293 converts). Two idle ticks
         // first, so ecg_task has surely put the ADS1293 back in standby.
         idle_ticks = measuring_now ? 0 : idle_ticks + 1;
-        if (idle_ticks >= 2 && offline_log_has_data() && esp_timer_get_time() >= next_copy_try_us) {
+        pending_resolve();
+        if (idle_ticks >= 2 && s_pending_n == 0 && offline_log_has_data() && esp_timer_get_time() >= next_copy_try_us) {
             if (!offline_log_copy_to_sd()) {
                 next_copy_try_us = esp_timer_get_time() + 30 * US_PER_S;
             }
