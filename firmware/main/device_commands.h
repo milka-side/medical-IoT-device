@@ -1,10 +1,10 @@
 #pragma once
 
-// Button presses from the dashboard ("measure X", "upload the SD card"). The server returns them in
-// the response to the device's regular telemetry POST (web/server.js
-// /api/data -> "commands"), so picking them up costs no extra request.
+// Button presses from the dashboard ("measure X", "upload the SD card"). The
+// server sends them as an Azure IoT Hub direct method "command" with payload
+// {"commands":[...]} (web/src/azure-commands.js, telemetry_azure.c).
 
-// Bitmask: several different buttons pressed between two telemetry posts
+// Bitmask: several different buttons pressed between two sender-loop ticks
 // all arrive together, so they're OR-ed rather than one overwriting another.
 typedef enum {
     MEASURE_NONE = 0,
@@ -19,6 +19,6 @@ typedef enum {
     CMD_FORCE = 1 << 4,
 } measure_cmd_t;
 
-// Parses the "commands":[...] array out of a /api/data response body.
+// Parses the "commands":[...] array out of a direct-method payload.
 // Anything missing or malformed counts as "no command".
 measure_cmd_t device_commands_parse(const char *body);

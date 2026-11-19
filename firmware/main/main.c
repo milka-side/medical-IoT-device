@@ -27,9 +27,7 @@
 #include "offline_log.h"
 #include "sd_logger.h"
 #include "sd_upload.h"
-#include "telemetry_http.h"
 #include "telemetry_azure.h"
-#include "telemetry_mqtt.h"
 #include "tmp117.h"
 #include "wifi_connect.h"
 
@@ -39,7 +37,7 @@ static const char *TAG = "main";
 // source for the ADS1293 analog front end (both radiated pickup and
 // supply-rail current spikes during TX are documented on ESP32 boards).
 // Observe raw/filtered ECG over USB serial instead, since there's no
-// network to POST over. Flip back to 0 to restore normal operation.
+// network to send over. Flip back to 0 to restore normal operation.
 #define WIFI_DISABLED_FOR_TEST 0
 
 #define ECG_QUEUE_LEN    2048
@@ -75,7 +73,7 @@ static volatile bool s_temp_active = false;
 
 // Window end times on the esp_timer clock. Real-time deadlines rather than
 // counting loop iterations: each sender iteration is 1 s of sleep *plus*
-// however long the command poll and telemetry POST took, so counting
+// however long sending the telemetry took, so counting
 // iterations stretched "10 minutes" by however slow the network was.
 // Sender-task only, so the non-atomic 64-bit access is fine.
 static int64_t s_ecg_deadline_us, s_vitals_deadline_us, s_temp_deadline_us;
@@ -305,8 +303,8 @@ typedef struct {
 } telemetry_t;
 
 // Random per power-on id: with "seq" it identifies each batch, so the server
-// can drop the second copy when the same batch arrives over both HTTP and
-// Azure IoT Hub; offline/SD data also carries it so the server can date it.
+// can drop a batch it has already seen; offline/SD data also carries it so
+// the server can date it.
 static uint32_t s_boot_id;
 
 static uint32_t boot_id(void)
@@ -633,7 +631,7 @@ static bool button_rearm_pending(void)
 }
 
 // Commands that arrived over Azure IoT Hub direct methods (MQTT task),
-// picked up by the sender loop on its next tick like the HTTP ones.
+// picked up by the sender loop on its next tick.
 static portMUX_TYPE s_remote_lock = portMUX_INITIALIZER_UNLOCKED;
 static measure_cmd_t s_remote_cmds;
 
@@ -713,7 +711,7 @@ static void sender_loop(void)
         }
         next_tick += pdMS_TO_TICKS(1000);
         if ((int32_t)(xTaskGetTickCount() - next_tick) > 0) {
-            next_tick = xTaskGetTickCount() + pdMS_TO_TICKS(1000); // fell behind (slow POST)
+            next_tick = xTaskGetTickCount() + pdMS_TO_TICKS(1000); // fell behind (slow send)
         }
         button_rearm_pending();
 
@@ -855,8 +853,6 @@ static void sender_loop(void)
             continue;
         }
         size_t len = build_telemetry_json(json, cap, &t);
-        measure_cmd_t cmds = MEASURE_NONE;
-
         bool measuring_now = s_ecg_active || s_vitals_active || s_temp_active;
         if (measuring_now && !in_session) {
             offline_log_session_start(boot_id());
@@ -870,22 +866,17 @@ static void sender_loop(void)
         if (len == 0) {
             ESP_LOGE(TAG, "telemetry JSON didn't fit in %u bytes, batch dropped", (unsigned)cap);
         } else if (wifi_connect_is_up()) {
-            // The response also carries any queued button presses - one
-            // request per second covers both telemetry and command polling.
-            if (telemetry_http_post(json, len, &cmds) == ESP_OK) {
-                delivered = true;
-            } else {
-                ESP_LOGW(TAG, "telemetry POST failed");
-            }
-            if (telemetry_mqtt_publish(json, len) != ESP_OK) {
-                ESP_LOGW(TAG, "telemetry MQTT publish failed");
-            }
+            // Telemetry goes only to Azure IoT Hub; dashboard commands come
+            // back as direct methods (on_azure_command).
             bool idle = !boot_lockout && !(s_ecg_active || s_vitals_active || s_temp_active);
-            if (telemetry_azure_publish(json, len, idle) != ESP_OK) {
-                ESP_LOGW(TAG, "telemetry Azure publish failed");
+            esp_err_t err = telemetry_azure_publish(json, len, idle);
+            if (err == ESP_OK) {
+                delivered = true;
+            } else if (!idle) { // idle status lines aren't worth a warning every second
+                ESP_LOGW(TAG, "telemetry Azure publish failed: %s", esp_err_to_name(err));
             }
         } else {
-            ESP_LOGW(TAG, "Wi-Fi down, skipping POST (ecg_samples=%d)", n);
+            ESP_LOGW(TAG, "Wi-Fi down, skipping telemetry (ecg_samples=%d)", n);
         }
         // Measurement data the server didn't get is kept for the SD card.
         if (log_this_line && !delivered && len > 0) {
@@ -903,7 +894,7 @@ static void sender_loop(void)
             }
         }
 
-        cmds |= take_remote_commands();
+        measure_cmd_t cmds = take_remote_commands();
 
         // "Завантажити дані з SD": only while idle (the card can't be used
         // while the ADS1293 converts), and only after anything still in the
@@ -946,7 +937,7 @@ void app_main(void)
 
     // Wi-Fi: block here until connected or the quick retries run out -
     // after that wifi_connect keeps retrying every 10 s in the background,
-    // and POSTs are just skipped while it's down.
+    // and telemetry is just skipped while it's down.
 #if !WIFI_DISABLED_FOR_TEST && !defined(CONFIG_MIOT_CALIBRATION_MODE)
     if (wifi_connect_start() != ESP_OK) {
         ESP_LOGW(TAG, "starting without Wi-Fi; will keep retrying in background");
@@ -1004,9 +995,6 @@ void app_main(void)
     tmp117_init(i2c_bus);
     max30102_init(i2c_bus);
 
-    if (telemetry_mqtt_init() != ESP_OK) {
-        ESP_LOGW(TAG, "MQTT telemetry init failed; continuing with HTTP only");
-    }
     telemetry_azure_set_command_handler(on_azure_command);
     if (telemetry_azure_init() != ESP_OK) {
         ESP_LOGW(TAG, "Azure IoT Hub telemetry init failed; continuing without it");

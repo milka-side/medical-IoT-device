@@ -1,8 +1,8 @@
 # Прошивка ESP32-C6 (ESP-IDF)
 
 Зчитує ЕКГ (ADS1293, SPI), пульс/SpO₂ (MAX30102, I2C), температуру (TMP117, I2C)
-і шле телеметрію на сервер (`web/server.js`) через `POST /api/data` у форматі,
-який вже очікує сервер. Поки що без SD-логування — тільки sensor -> сайт.
+і шле телеметрію в Azure IoT Hub (MQTT, порт 8883), звідки її читає сервер
+(`web/server.js`). Команди з сайту приходять як direct methods Azure.
 
 ## Розпіновка
 
@@ -40,22 +40,21 @@ MISO/CS тут — це реальна розводка плати (`main/pins.h
 ```bash
 cd firmware
 idf.py set-target esp32c6
-idf.py menuconfig   # -> Medical IoT Device: Wi-Fi SSID/пароль, Server URL, Device ID
+idf.py menuconfig   # -> Medical IoT Device: Wi-Fi, рядок підключення Azure, Device ID
 idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 
 Налаштування у `menuconfig -> Medical IoT Device`:
 - **Wi-Fi SSID / password** — мережа, до якої підключається плата.
-- **Server URL** — повний шлях до `/api/data` сервера (`web/server.js`), напр.
-  `http://192.168.1.50:3000/api/data`.
+- **Azure IoT Hub device connection string** — рядок підключення пристрою
+  (`HostName=...;DeviceId=...;SharedAccessKey=...`). Не комітити: тримати в
+  `sdkconfig.defaults.local`.
+- **Server URL** — адреса сервера (`web/server.js`), напр.
+  `http://192.168.1.50:3000`. Потрібна лише для кнопки «Завантажити дані з SD»
+  (`POST /api/sd-upload`): цілий файл завеликий для безкоштовного тарифу Azure.
 - **API-Key** — заповнити, тільки якщо сервер запущено з `API_KEY=...`.
 - **Device ID** — `device_id`, який бачитиме панель.
-- **Also publish telemetry over MQTT** (вимкнено за замовчуванням) — якщо
-  увімкнути, той самий JSON додатково шлеться в MQTT-брокер (`MQTT broker
-  URI`, опційно `username`/`password`) на топік
-  `wearable/<Device ID>/data` — саме це приймає `web/src/mqtt-ingest.js`.
-  HTTP POST при цьому нікуди не дівається, працює паралельно.
 
 ## Що робить прошивка
 
@@ -64,9 +63,9 @@ idf.py -p /dev/ttyACM0 flash monitor
   читання по перериванню DRDY. Регістри й початкова конфігурація взяті з
   відкритої бібліотеки ProtoCentral (`protocentral-ads1293-arduino`) —
   **варто звірити з даташитом TI SNAS602C**, якщо показання виглядають дивно.
-- `telemetry_mqtt.c` — опційна (вимкнена за замовчуванням) паралельна
-  публікація того самого JSON в MQTT-брокер, топік
-  `wearable/<Device ID>/data`.
+- `telemetry_azure.c` — підключення до Azure IoT Hub, надсилання телеметрії
+  і приймання команд (direct methods).
+- `sd_upload.c` — передача файлів із SD-картки на сервер по HTTP.
 - `tmp117.c` — читання температури (°C).
 - `max30102.c` — драйвер FIFO + **спрощена, нека́лібрована** оцінка
   пульсу (порогові переходи) і SpO₂ (ratio-of-ratios за емпіричною формулою).
@@ -75,7 +74,7 @@ idf.py -p /dev/ttyACM0 flash monitor
   дисклеймері в корені README проєкту).
 - `main.c` — зводить усе разом: таска читання ЕКГ (чекає DRDY), таска опитування
   MAX30102 (~100 Гц), і раз на секунду збирає накопичені відліки ЕКГ + останні
-  hr/spo2/temp в один JSON і шле `POST /api/data`.
+  hr/spo2/temp в один JSON і шле його в Azure IoT Hub.
 
 Поле `battery` поки не шлеться: на цій схемі немає виводу напруги батареї на
 АЦП-здатний пін (±BAT ідуть напряму в термінали зарядного роз'єму плати) —

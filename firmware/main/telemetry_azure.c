@@ -326,7 +326,7 @@ esp_err_t telemetry_azure_init(void)
 esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle)
 {
     if (!s_connected) {
-        return ESP_OK;
+        return ESP_ERR_INVALID_STATE;
     }
     if (idle) {
         int64_t now = esp_timer_get_time();
@@ -352,7 +352,7 @@ esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle)
     (void)json_body;
     (void)len;
     (void)idle;
-    return ESP_OK;
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 void telemetry_azure_set_command_handler(azure_command_handler_t handler)

@@ -252,7 +252,7 @@ function setNotifier(fn) { notify = fn; }
 
 // --- measurements the device saved on its SD card while offline -----------
 //
-// A file is the device's telemetry lines (same JSON as POST /api/data), one
+// A file is the device's telemetry lines (same JSON as sent to Azure IoT Hub), one
 // per second, grouped into measurements by header lines
 // {"device_id","boot","uptime_s"[,"epoch"]} that start each one. Each group
 // becomes one saved record. Time: the header's epoch if the device clock was

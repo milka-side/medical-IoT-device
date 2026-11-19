@@ -1,11 +1,11 @@
 # Target: Seeed XIAO ESP32-C6 ("ESP32_C6 speed studio" on the schematic)
 CONFIG_IDF_TARGET="esp32c6"
 
-# Give the HTTP client / Wi-Fi events enough stack headroom
+# Give the Wi-Fi / TLS events enough stack headroom
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
 # Default single-app partition table (factory=1MB) is too small once
-# Wi-Fi+HTTP client+mbedTLS are linked in - use a bigger app partition.
+# Wi-Fi+MQTT/HTTP clients+mbedTLS are linked in - use a bigger app partition.
 # XIAO ESP32-C6 has 4MB flash, so 3MB for the app leaves plenty of room.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
@@ -49,7 +49,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 # or change below) - open guest Wi-Fi, no password.
 CONFIG_MIOT_WIFI_SSID="UCU_Guest"
 CONFIG_MIOT_WIFI_PASSWORD=""
-CONFIG_MIOT_SERVER_URL="http://10.10.241.83:3000/api/data"
+CONFIG_MIOT_SERVER_URL="http://10.10.241.83:3000"
 
 # microSD logging (sd_logger.c): long file names (meas_00001.jsonl),
 # name buffer on the heap rather than the task stack.
