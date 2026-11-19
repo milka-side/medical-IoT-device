@@ -1,8 +1,7 @@
 // Command queue: the dashboard POSTs "measure X" (or "upload the SD card")
-// for a device_id; the device
-// picks everything queued since last time out of the response to its
-// once-a-second telemetry POST /api/data (GET /api/command does the same for
-// simulators / older firmware). Taking the commands consumes them.
+// for a device_id; the device picks everything queued since last time out
+// of the response to its once-a-second telemetry POST /api/data. Taking the
+// commands consumes them.
 // all_force = "Виміряти все одно": measure everything even during the
 // device's power-on sensor warm-up.
 const VALID_TYPES = new Set(['ecg', 'vitals', 'temp', 'all', 'all_force', 'sd_upload']);

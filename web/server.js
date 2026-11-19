@@ -108,8 +108,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname.startsWith('/api/') && req.method === 'POST') {
     // X-API-Key guards what the *device* sends. The dashboard's own
     // endpoints (buttons, saving, settings) can't carry a secret from a
-    // browser page, and requiring one there just made every button fail
-    // with 401 as soon as API_KEY was set.
+    // browser page.
     const deviceEndpoint = pathname === '/api/data' || pathname === '/api/line' || pathname === '/api/sd-upload';
     if (deviceEndpoint && API_KEY && req.headers['x-api-key'] !== API_KEY) {
       return sendJson(res, 401, { error: 'невірний або відсутній X-API-Key' });
@@ -215,19 +214,6 @@ const server = http.createServer(async (req, res) => {
       const result = history.updateSettings(parsed);
       return sendJson(res, result.ok ? 200 : 400, result);
     }
-  }
-
-  if (req.method === 'GET' && pathname === '/api/command') {
-    // Пристрій опитує це раз на секунду, поки простоює; одне звернення
-    // одразу забирає всі команди, що накопичились (one-shot). Як і
-    // POST /api/data, захищено X-API-Key, коли він заданий на сервері.
-    if (API_KEY && req.headers['x-api-key'] !== API_KEY) {
-      return sendJson(res, 401, { error: 'невірний або відсутній X-API-Key' });
-    }
-    const deviceId = (reqUrl.searchParams.get('device_id') || '').slice(0, 64);
-    if (!deviceId) return sendJson(res, 400, { error: 'відсутній device_id' });
-    const types = commands.takeCommands(deviceId);
-    return sendJson(res, 200, { type: types[0] ?? null, types });
   }
 
   if (req.method === 'GET' && pathname === '/api/history') {
