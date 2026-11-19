@@ -3,15 +3,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "device_commands.h"
 #include "esp_err.h"
 
-// POSTs a raw JSON body to CONFIG_MIOT_SERVER_URL (web/server.js /api/data)
-// over a reused keep-alive connection. Adds the X-API-Key header when
-// CONFIG_MIOT_API_KEY is set. Any dashboard button presses queued for this
-// device come back in the same response and are returned via *out_cmds
-// (may be NULL). Returns ESP_OK on a 2xx response.
-esp_err_t telemetry_http_post(const char *json_body, size_t len, measure_cmd_t *out_cmds);
+// HTTP is used only for "Завантажити дані з SD": live telemetry and
+// dashboard commands go through Azure IoT Hub (telemetry_azure.h).
 
 // Sends one piece of an SD-card measurement file to the server
 // (web/server.js POST /api/sd-upload). Pieces go in order (part 0, 1, ...);

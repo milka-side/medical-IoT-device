@@ -49,7 +49,8 @@ CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 # or change below) - open guest Wi-Fi, no password.
 CONFIG_MIOT_WIFI_SSID="UCU_Guest"
 CONFIG_MIOT_WIFI_PASSWORD=""
-CONFIG_MIOT_SERVER_URL="http://10.10.245.218:3000/api/data"
+# Laptop running web/server.js - used only for "Завантажити дані з SD".
+CONFIG_MIOT_SERVER_URL="http://10.10.245.218:3000"
 
 # microSD logging (sd_logger.c): long file names (meas_00001.jsonl),
 # name buffer on the heap rather than the task stack.

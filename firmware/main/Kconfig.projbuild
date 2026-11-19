@@ -9,11 +9,12 @@ menu "Medical IoT Device"
         default "mypassword"
 
     config MIOT_SERVER_URL
-        string "Server URL for telemetry POST"
-        default "http://192.168.1.100:3000/api/data"
+        string "Server URL for SD-card uploads"
+        default "http://192.168.1.100:3000"
         help
-            Full URL of the web/server.js endpoint, e.g.
-            http://<IP of the computer running npm start>:3000/api/data
+            Address of web/server.js, e.g. http://<IP of the laptop>:3000.
+            Used only by "Завантажити дані з SD" (POST /api/sd-upload);
+            live telemetry and commands go through Azure IoT Hub.
 
     config MIOT_API_KEY
         string "X-API-Key header (leave empty if server has none)"
@@ -81,42 +82,16 @@ menu "Medical IoT Device"
             and ECG,<sample> lines at 200 Hz. Wi-Fi stays off (no network noise).
             Never leave this on in a normal build.
 
-    config MIOT_MQTT_ENABLE
-        bool "Also publish telemetry over MQTT"
-        default n
-        help
-            Publishes the same JSON payload used for the HTTP POST to an
-            MQTT broker, on topic wearable/<device_id>/data - matches
-            web/src/mqtt-ingest.js's default subscription (wearable/+/data).
-            Runs alongside the HTTP POST, not instead of it.
-
-    config MIOT_MQTT_URL
-        string "MQTT broker URI (mqtt:// or mqtts://)"
-        depends on MIOT_MQTT_ENABLE
-        default "mqtt://192.168.1.100:1883"
-        help
-            Passed straight to esp-mqtt as broker.address.uri, e.g.
-            mqtt://<IP of the computer running the broker>:1883.
-
-    config MIOT_MQTT_USERNAME
-        string "MQTT username (leave empty if broker has none)"
-        depends on MIOT_MQTT_ENABLE
-        default ""
-
-    config MIOT_MQTT_PASSWORD
-        string "MQTT password (leave empty if broker has none)"
-        depends on MIOT_MQTT_ENABLE
-        default ""
-
     config MIOT_AZURE_ENABLE
-        bool "Also publish telemetry to Azure IoT Hub"
-        default n
+        bool "Send telemetry to Azure IoT Hub"
+        default y
         help
             Publishes the same JSON payload to Azure IoT Hub over MQTT
             (mqtts://<hub>.azure-devices.net:8883, TLS, SAS token generated
             on the device). The dashboard reads it back through the hub's
             built-in Event Hub-compatible endpoint (web/src/azure-ingest.js).
-            Runs alongside the HTTP POST, not instead of it.
+            This is the only live data path: with it off, measurements
+            only go to the SD card.
 
     config MIOT_AZURE_CONNECTION_STRING
         string "Azure IoT Hub device connection string"

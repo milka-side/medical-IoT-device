@@ -8,13 +8,7 @@
 
 static const char *TAG = "telemetry_http";
 
-// One client reused for every post, so the TCP connection stays open between
-// the once-a-second posts (HTTP keep-alive) instead of a fresh TCP handshake
-// - and the radio time that costs - every single second.
-static esp_http_client_handle_t s_client;
-
-// Response body: small ({"accepted":..,"commands":[..]}), anything past the
-// buffer is dropped - "commands" comes early in the JSON.
+// Server's reply to an upload piece: small ({"ok":true,...}).
 static char s_resp[256];
 static size_t s_resp_len;
 
@@ -30,90 +24,13 @@ static esp_err_t on_http_event(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-static esp_http_client_handle_t get_client(void)
-{
-    if (s_client != NULL) {
-        return s_client;
-    }
-    esp_http_client_config_t config = {
-        .url = CONFIG_MIOT_SERVER_URL,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = 5000,
-        .event_handler = on_http_event,
-    };
-    s_client = esp_http_client_init(&config);
-    if (s_client == NULL) {
-        ESP_LOGE(TAG, "esp_http_client_init failed");
-        return NULL;
-    }
-    esp_http_client_set_header(s_client, "Content-Type", "application/json");
-    if (strlen(CONFIG_MIOT_API_KEY) > 0) {
-        esp_http_client_set_header(s_client, "X-API-Key", CONFIG_MIOT_API_KEY);
-    }
-    return s_client;
-}
-
-static void drop_client(void)
-{
-    if (s_client != NULL) {
-        esp_http_client_cleanup(s_client);
-        s_client = NULL;
-    }
-}
-
-esp_err_t telemetry_http_post(const char *json_body, size_t len, measure_cmd_t *out_cmds)
-{
-    if (out_cmds) {
-        *out_cmds = MEASURE_NONE;
-    }
-
-    esp_err_t err = ESP_FAIL;
-    // Second attempt only if the first failed at the transport level: the
-    // server closes idle keep-alive connections, and the reused socket then
-    // fails once - a fresh connection is the fix, not losing the batch.
-    for (int attempt = 0; attempt < 2; attempt++) {
-        bool reused = s_client != NULL;
-        esp_http_client_handle_t client = get_client();
-        if (client == NULL) {
-            return ESP_FAIL;
-        }
-        s_resp_len = 0;
-        s_resp[0] = '\0';
-        esp_http_client_set_post_field(client, json_body, (int)len);
-        err = esp_http_client_perform(client);
-        if (err == ESP_OK) {
-            break;
-        }
-        ESP_LOGW(TAG, "POST failed: %s", esp_err_to_name(err));
-        drop_client();
-        if (!reused) {
-            break; // fresh connection failed too - server/network is down, don't double the wait
-        }
-    }
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    // Commands ride on the response whether or not this batch was accepted -
-    // the server has already dequeued them by the time it replies.
-    if (out_cmds) {
-        *out_cmds = device_commands_parse(s_resp);
-    }
-    int status = esp_http_client_get_status_code(s_client);
-    if (status < 200 || status >= 300) {
-        ESP_LOGW(TAG, "server returned HTTP %d", status);
-        return ESP_FAIL;
-    }
-    return ESP_OK;
-}
-
-// Separate short-lived client for SD uploads: different URL, larger bodies,
-// and it only runs while nothing is being measured.
+// A short-lived client per piece: uploads only run while nothing is being
+// measured, a few times a day at most.
 esp_err_t telemetry_http_upload_part(const char *file_name, int part, bool last, uint32_t boot_id,
                                      long long uptime_s, const char *data, size_t len)
 {
-    // Same server as the telemetry URL, with the path swapped for the
-    // upload endpoint: "http://host:port/api/data" -> ".../api/sd-upload?...".
+    // CONFIG_MIOT_SERVER_URL is the laptop's server ("http://host:port", any
+    // "/api/..." suffix is dropped) -> "http://host:port/api/sd-upload?...".
     const char *base = CONFIG_MIOT_SERVER_URL;
     const char *api = strstr(base, "/api/");
     int base_len = api ? (int)(api - base) : (int)strlen(base);

@@ -3,7 +3,6 @@ idf_component_register(
         "main.c"
         "wifi_connect.c"
         "telemetry_http.c"
-        "telemetry_mqtt.c"
         "telemetry_azure.c"
         "device_commands.c"
         "ads1293.c"

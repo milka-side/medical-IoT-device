@@ -25,9 +25,7 @@
 #include "offline_log.h"
 #include "sd_logger.h"
 #include "sd_upload.h"
-#include "telemetry_http.h"
 #include "telemetry_azure.h"
-#include "telemetry_mqtt.h"
 #include "tmp117.h"
 #include "wifi_connect.h"
 
@@ -723,24 +721,16 @@ static void sender_loop(void)
         if (len == 0) {
             ESP_LOGE(TAG, "telemetry JSON didn't fit in %u bytes, batch dropped", (unsigned)cap);
         } else if (wifi_connect_is_up()) {
-            // The response also carries any queued button presses - one
-            // request per second covers both telemetry and command polling.
-            if (telemetry_http_post(json, len, &cmds) == ESP_OK) {
-                delivered = true;
-            } else {
-                ESP_LOGW(TAG, "telemetry POST failed");
-            }
-            if (telemetry_mqtt_publish(json, len) != ESP_OK) {
-                ESP_LOGW(TAG, "telemetry MQTT publish failed");
-            }
             bool idle = !boot_lockout && !(s_ecg_active || s_vitals_active || s_temp_active);
-            if (telemetry_azure_publish(json, len, idle) != ESP_OK) {
-                ESP_LOGW(TAG, "telemetry Azure publish failed");
+            if (telemetry_azure_publish(json, len, idle) == ESP_OK) {
+                delivered = true;
+            } else if (log_this_line) {
+                ESP_LOGW(TAG, "not connected to Azure IoT Hub - keeping this measurement for the SD card");
             }
-        } else {
-            ESP_LOGW(TAG, "Wi-Fi down, skipping POST (ecg_samples=%d)", n);
+        } else if (log_this_line) {
+            ESP_LOGW(TAG, "Wi-Fi down - keeping this measurement for the SD card (ecg_samples=%d)", n);
         }
-        // Measurement data the server didn't get is kept for the SD card.
+        // Measurement data that didn't reach Azure is kept for the SD card.
         if (log_this_line && !delivered && len > 0) {
             offline_log_append(json, len);
         }
@@ -852,9 +842,6 @@ void app_main(void)
     tmp117_init(i2c_bus);
     max30102_init(i2c_bus);
 
-    if (telemetry_mqtt_init() != ESP_OK) {
-        ESP_LOGW(TAG, "MQTT telemetry init failed; continuing with HTTP only");
-    }
     telemetry_azure_set_command_handler(on_azure_command);
     if (telemetry_azure_init() != ESP_OK) {
         ESP_LOGW(TAG, "Azure IoT Hub telemetry init failed; continuing without it");

@@ -30,7 +30,9 @@ esp_err_t telemetry_azure_init(void);
 // `idle` = no measurement running. Idle status messages are throttled to
 // one per CONFIG_MIOT_AZURE_IDLE_PERIOD_S, because the free F1 tier allows
 // only 8000 messages/day and the main loop ticks once a second.
-// Best-effort: silently dropped while not connected.
+// Returns ESP_ERR_INVALID_STATE while not connected to the hub (and
+// ESP_ERR_NOT_SUPPORTED when Azure is disabled), so the caller can keep
+// measurement data for the SD card instead.
 esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle);
 
 // Dashboard commands over Azure IoT Hub direct methods: the server calls
