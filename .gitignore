@@ -3,6 +3,3 @@ __pycache__/
 .azure.env
 # Saved measurement records - patient data, never commit
 web/data/
-# Local MQTT broker credentials
-web/.mqtt.env
-web/mosquitto/passwd

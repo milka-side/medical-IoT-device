@@ -78,20 +78,4 @@ function normalize(input, receivedAt = Date.now()) {
   return { ok: true, msg, warnings: dropped };
 }
 
-function parseLine(line) {
-  const trimmed = String(line).trim();
-  if (!trimmed) return null;
-  if (trimmed.startsWith('{')) {
-    try { return JSON.parse(trimmed); } catch { return null; }
-  }
-  const obj = {};
-  for (const part of trimmed.split(/[;\s]+/)) {
-    const m = part.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.+)$/);
-    if (!m) continue;
-    const key = m[1].toLowerCase();
-    obj[key] = key === 'ecg' ? m[2].split(',') : m[2];
-  }
-  return Object.keys(obj).length ? obj : null;
-}
-
-module.exports = { normalize, parseLine, DEFAULT_FS };
+module.exports = { normalize, DEFAULT_FS };

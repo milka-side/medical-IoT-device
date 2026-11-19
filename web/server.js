@@ -4,10 +4,7 @@ const path = require('path');
 const { WebSocketServer } = require('ws');
 
 const hub = require('./src/hub');
-const { parseLine } = require('./src/parser');
-const { startMqttIngest } = require('./src/mqtt-ingest');
 const { startAzureIngest } = require('./src/azure-ingest');
-const commands = require('./src/commands');
 const history = require('./src/history');
 const azureCommands = require('./src/azure-commands');
 
@@ -83,15 +80,6 @@ function serveStatic(req, res) {
   });
 }
 
-function summarize(results) {
-  const accepted = results.filter((r) => r.ok).length;
-  const errors = results.filter((r) => !r.ok).map((r) => r.error);
-  const warnings = results.filter((r) => r.ok).flatMap((r) => r.warnings || []);
-  const out = { accepted, rejected: errors.length, errors: errors.slice(0, 10) };
-  if (warnings.length) out.warnings = warnings.slice(0, 10);
-  return out;
-}
-
 const server = http.createServer(async (req, res) => {
   const reqUrl = new URL(req.url, 'http://x');
   const { pathname } = reqUrl;
@@ -109,35 +97,12 @@ const server = http.createServer(async (req, res) => {
     // X-API-Key guards what the *device* sends. The dashboard's own
     // endpoints (buttons, saving, settings) can't carry a secret from a
     // browser page.
-    const deviceEndpoint = pathname === '/api/data' || pathname === '/api/line' || pathname === '/api/sd-upload';
+    const deviceEndpoint = pathname === '/api/sd-upload';
     if (deviceEndpoint && API_KEY && req.headers['x-api-key'] !== API_KEY) {
       return sendJson(res, 401, { error: 'невірний або відсутній X-API-Key' });
     }
     let body;
     try { body = await readBody(req); } catch (e) { return sendJson(res, 413, { error: e.message }); }
-
-    if (pathname === '/api/data') {
-      let parsed;
-      try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: 'некоректний JSON' }); }
-      const items = Array.isArray(parsed) ? parsed : [parsed];
-      const out = summarize(items.map((it) => hub.ingest(it, 'http')));
-      // Queued button presses ride back on the device's own telemetry post,
-      // so it needs no separate polling request (one radio wake-up a second
-      // instead of two). Included even if this batch was rejected - the
-      // device is clearly online and listening.
-      const ids = [...new Set(items.map((it) => it && it.device_id).filter(Boolean).map((id) => String(id).slice(0, 64)))];
-      out.commands = [...new Set(ids.flatMap((id) => commands.takeCommands(id)))];
-      return sendJson(res, out.accepted ? 200 : 400, out);
-    }
-
-    if (pathname === '/api/line') {
-      const results = body.split(/\r?\n/).filter((l) => l.trim()).map((l) => {
-        const obj = parseLine(l);
-        return obj ? hub.ingest(obj, 'line') : { ok: false, error: `не вдалося розібрати рядок: ${l.slice(0, 80)}` };
-      });
-      const out = summarize(results);
-      return sendJson(res, out.accepted ? 200 : 400, out);
-    }
 
     if (pathname === '/api/sd-upload') {
       // One piece of a measurement file from the device's SD card. Pieces
@@ -177,26 +142,25 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/command') {
-      // A dashboard button. First choice: an Azure IoT Hub direct method -
-      // the device answers right away whether it will do it. If Azure isn't
-      // configured or the device isn't connected to the hub, the command is
-      // queued for the device's next HTTP telemetry post instead.
+      // A dashboard button, sent to the device as an Azure IoT Hub direct
+      // method: the device answers right away whether it will do it.
       let parsed;
       try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: 'некоректний JSON' }); }
       const deviceId = String(parsed.device_id ?? '').slice(0, 64);
       if (!deviceId) return sendJson(res, 400, { error: 'відсутній device_id' });
-      if (!commands.VALID_TYPES.has(parsed.type)) {
+      if (!azureCommands.VALID_TYPES.has(parsed.type)) {
         return sendJson(res, 400, { ok: false, error: `невідома команда: ${parsed.type}` });
       }
       const az = await azureCommands.sendCommand(parsed.type);
-      if (az && az.delivered) {
-        if (az.status === 200) return sendJson(res, 200, { ok: true, online: true, via: 'azure' });
-        return sendJson(res, 409, { ok: false, via: 'azure', error: az.reason || `код ${az.status}` });
+      if (!az) {
+        return sendJson(res, 503, { ok: false, error: 'на сервері не налаштовано Azure IoT Hub (web/.azure.env)' });
       }
-      const result = commands.setCommand(deviceId, parsed.type);
-      result.via = 'http';
-      if (az) console.log(`[azure] direct method не вдався (${az.error}) - команда піде через HTTP`);
-      return sendJson(res, result.ok ? 200 : 400, result);
+      if (!az.delivered) {
+        console.log(`[azure] direct method не вдався: ${az.error}`);
+        return sendJson(res, 503, { ok: false, via: 'azure', error: 'пристрій зараз не підключений до Azure IoT Hub' });
+      }
+      if (az.status === 200) return sendJson(res, 200, { ok: true, online: true, via: 'azure' });
+      return sendJson(res, 409, { ok: false, via: 'azure', error: az.reason || `код ${az.status}` });
     }
 
     if (pathname === '/api/history/save') {
@@ -256,13 +220,11 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ server, path: '/ws' });
 wss.on('connection', (ws) => hub.addClient(ws));
 
-startMqttIngest(hub);
 startAzureIngest(hub);
 azureCommands.startAzureCommands();
 
 server.listen(PORT, HOST, () => {
   console.log(`Панель: http://localhost:${PORT}`);
-  console.log(`Прийом даних: POST http://<IP цього комп'ютера>:${PORT}/api/data`);
+  console.log(`Файли з SD-картки: POST http://<IP цього комп'ютера>:${PORT}/api/sd-upload`);
   if (API_KEY) console.log('Увімкнено перевірку API-Key');
-  if (process.env.INGEST_ONLY) console.log(`Показуються лише дані з: ${process.env.INGEST_ONLY}`);
 });

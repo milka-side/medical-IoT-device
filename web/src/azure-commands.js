@@ -1,8 +1,7 @@
 // Dashboard commands to the device over Azure IoT Hub direct methods: the
 // server calls method "command" on the device with {"commands":["all"]} and
 // gets an immediate answer - accepted (200) or refused with a reason (4xx) -
-// or an error if the device isn't connected to the hub. server.js falls
-// back to the HTTP command queue (src/commands.js) in that case.
+// or an error if the device isn't connected to the hub.
 //
 // Needs the hub's service connection string (policy iothubowner):
 // AZURE_IOTHUB_CONNECTION_STRING, or derived from what .azure.env already
@@ -12,6 +11,9 @@
 const { Client } = require('azure-iothub');
 
 const METHOD = 'command';
+
+// all_force = "Виміряти все одно": measure even during the power-on warm-up.
+const VALID_TYPES = new Set(['ecg', 'vitals', 'temp', 'all', 'all_force', 'sd_upload']);
 
 // Refusal codes the firmware sends back (main.c on_azure_command).
 const REASONS = {
@@ -72,4 +74,4 @@ async function sendCommand(type) {
   }
 }
 
-module.exports = { startAzureCommands, sendCommand };
+module.exports = { startAzureCommands, sendCommand, VALID_TYPES };
