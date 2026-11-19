@@ -34,7 +34,7 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 #   (mean of the settled part of a 3-minute contact) and, as an estimate,
 #   body = skin + k*(skin - room), room measured by the TMP117 while idle.
 #   k = 0.19 from a healthy adult on 2026-11-18: skin 35.43 C, room
-#   28.83 C, body ~36.7 C. (A fixed +2.75 C offset read 38.2 C there.)
+#   28.83 C, body ~36.7 C.
 #   Fingertip temperature only approximates body temperature.
 CONFIG_MIOT_MAX30102_LEDS_SWAPPED=y
 CONFIG_MIOT_SPO2_COEF_A_X100=11430
@@ -49,7 +49,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 # or change below) - open guest Wi-Fi, no password.
 CONFIG_MIOT_WIFI_SSID="UCU_Guest"
 CONFIG_MIOT_WIFI_PASSWORD=""
-CONFIG_MIOT_SERVER_URL="http://10.10.241.83:3000/api/data"
+CONFIG_MIOT_SERVER_URL="http://10.10.245.218:3000/api/data"
 
 # microSD logging (sd_logger.c): long file names (meas_00001.jsonl),
 # name buffer on the heap rather than the task stack.
