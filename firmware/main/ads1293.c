@@ -146,70 +146,8 @@ static esp_err_t reg_read_burst(uint8_t addr, uint8_t *out, size_t len)
     return err;
 }
 
-// Wiring/SPI-mode bring-up diagnostic - leave at 0 for normal operation.
-// The register sequence below already assumes mode 0 @ 1 MHz works (that
-// was confirmed with this sweep during bring-up). Flip to 1 only when
-// chasing a dead/garbled REVID read; running it on every boot adds ~8
-// extra SPI transactions and several hundred ms of avoidable startup
-// delay/log spam for no benefit once the wiring is known good.
-#define ADS1293_RUN_SPI_DIAG_SWEEP 0
-
-#if ADS1293_RUN_SPI_DIAG_SWEEP
-static uint8_t spi_probe_revid_once(spi_host_device_t host, int cs_gpio, uint8_t mode, int clock_hz,
-                                     esp_err_t *out_err)
-{
-    spi_device_interface_config_t cfg = {
-        .clock_speed_hz = clock_hz,
-        .mode = mode,
-        .spics_io_num = cs_gpio,
-        .queue_size = 1,
-    };
-    spi_device_handle_t dev;
-    esp_err_t err = spi_bus_add_device(host, &cfg, &dev);
-    if (err != ESP_OK) {
-        *out_err = err;
-        return 0xEE;
-    }
-    uint8_t tx[2] = {REG_REVID | READ_BIT, 0x00};
-    uint8_t rx[2] = {0};
-    spi_transaction_t t = {
-        .length = 16,
-        .tx_buffer = tx,
-        .rx_buffer = rx,
-    };
-    err = spi_device_transmit(dev, &t);
-    spi_bus_remove_device(dev);
-    *out_err = err;
-    return rx[1];
-}
-
-// Tries every SPI mode (CPOL/CPHA) at two clock speeds and logs the REVID
-// read back from each combination. A correctly wired, powered ADS1293
-// should answer with a non-0x00/0xFF value on at least one of these - if
-// every combination comes back 0x00/0xFF/0xEE, the problem is physical
-// (wiring, power, CS, or a dead/absent chip), not SPI configuration.
-static void ads1293_spi_diagnostic_sweep(spi_host_device_t host, int cs_gpio)
-{
-    const int clocks[] = {100000, 1000000};
-    ESP_LOGW(TAG, "--- ADS1293 SPI diagnostic sweep (REVID should be != 0x00 and != 0xFF) ---");
-    for (size_t ci = 0; ci < sizeof(clocks) / sizeof(clocks[0]); ci++) {
-        for (uint8_t mode = 0; mode < 4; mode++) {
-            esp_err_t err;
-            uint8_t v = spi_probe_revid_once(host, cs_gpio, mode, clocks[ci], &err);
-            ESP_LOGW(TAG, "  mode=%d clock=%dHz -> REVID=0x%02X (%s)", mode, clocks[ci], v,
-                     esp_err_to_name(err));
-        }
-    }
-    ESP_LOGW(TAG, "--- end sweep ---");
-}
-#endif
-
 esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio, int miso_gpio, int bus_miso_gpio)
 {
-#if ADS1293_RUN_SPI_DIAG_SWEEP
-    ads1293_spi_diagnostic_sweep(host, cs_gpio);
-#endif
-
     spi_device_interface_config_t devcfg = {
         .clock_speed_hz = 1 * 1000 * 1000, // ADS1293 SPI max ~2 MHz, stay conservative
         .mode = 0,
@@ -310,11 +248,7 @@ esp_err_t ads1293_init(spi_host_device_t host, int cs_gpio, int miso_gpio, int b
 // (Philips, Edan), plus a separate notch at mains frequency. Tuned to that
 // spec at the actual ODR (800 sps with the current R2/R3).
 //
-// The first version of the mains notch here was a double boxcar average,
-// which turned out to have a much lower effective cutoff than intended
-// (~15 Hz, not 40 Hz) - it was blurring real QRS slopes into rounded
-// humps, not just removing 50 Hz. Replaced with a narrow 2nd-order IIR
-// notch: zeros on the unit circle at exactly 50 Hz null that frequency,
+// Mains: a narrow 2nd-order IIR notch - zeros on the unit circle at exactly 50 Hz null that frequency,
 // poles at the same angle but radius r<1 keep the notch only a few Hz
 // wide, so 10-40 Hz content (where QRS slopes live) passes through
 // essentially unaffected.
