@@ -9,7 +9,6 @@
     "start:azure-only": "set -a && . ./.azure.env && set +a && INGEST_ONLY=azure node server.js",
     "mqtt:broker": "docker start medical-mqtt || docker run -d --name medical-mqtt -p 1883:1883 -v \"$PWD/mosquitto\":/mosquitto/config eclipse-mosquitto:2",
     "mock": "node ../tools/mock-sender.js",
-    "mock:line": "node ../tools/mock-sender.js --mode line",
     "mock:azure": "node ../tools/azure-mock-sender.js",
     "mock:mqtt": "node ../tools/mqtt-mock-sender.js"
   },
