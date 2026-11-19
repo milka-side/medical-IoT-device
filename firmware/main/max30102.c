@@ -165,12 +165,6 @@ esp_err_t max30102_stop(void)
     return reg_write(REG_MODE_CONFIG, 0x80); // SHDN, <1 uA
 }
 
-esp_err_t max30102_set_led_currents(uint8_t led1_pa, uint8_t led2_pa)
-{
-    esp_err_t err = reg_write(REG_LED1_PA, led1_pa);
-    return err == ESP_OK ? reg_write(REG_LED2_PA, led2_pa) : err;
-}
-
 static int32_t bandpass_step(bandpass_t *bp, uint32_t x)
 {
     if (!bp->init) {

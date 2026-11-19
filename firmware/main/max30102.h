@@ -27,10 +27,6 @@ esp_err_t max30102_poll(void);
 // enough to trust - nothing is reported rather than a noisy guess.
 esp_err_t max30102_estimate_vitals(int *out_hr_bpm, int *out_spo2_pct, bool *out_valid);
 
-// Sets the LED1/LED2 pulse amplitudes (MAX30102 register units, ~0.2 mA per
-// LSB). Used by calibration mode to light one LED at a time.
-esp_err_t max30102_set_led_currents(uint8_t led1_pa, uint8_t led2_pa);
-
 // Raw quantities behind the last max30102_estimate_vitals() call, for
 // calibration logging. ir_ac/red_ac are RMS pulsatile amplitudes, ratio
 // is the SpO2 ratio-of-ratios R (0 if unknown).
