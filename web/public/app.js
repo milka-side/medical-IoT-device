@@ -122,8 +122,26 @@ function showLeadOff(d) {
   el.textContent = `Немає контакту електрода: ${off.join(', ')} — перевір, чи щільно прилягає до шкіри`;
 }
 
-// Warm-up banner and button states, from status/*_remaining_s.
+// While idle (warm-up included) the device reports once a minute, so the
+// warm-up countdown runs locally between messages.
+let lastControls = null;
+let lockoutEndsAt = 0;
+
 function updateControls(d) {
+  lastControls = d;
+  lockoutEndsAt = d.lockout_remaining_s > 0 ? (d.received_at || Date.now()) + d.lockout_remaining_s * 1000 : 0;
+  renderControls(d);
+}
+
+function tickLockout() {
+  if (!lockoutEndsAt || !lastControls) return;
+  const left = Math.max(0, Math.round((lockoutEndsAt - Date.now()) / 1000));
+  renderControls({ ...lastControls, lockout_remaining_s: left });
+  if (!left) lockoutEndsAt = 0;
+}
+
+// Warm-up banner and button states, from status/*_remaining_s.
+function renderControls(d) {
   // During warm-up only "Виміряти все одно" works. A forced measurement
   // can run while the countdown is still going.
   const lockout = (d.lockout_remaining_s ?? 0) > 0;
@@ -589,6 +607,7 @@ window.addEventListener('resize', drawViewer);
 loadHistory();
 connect();
 setInterval(updateConnBadge, 1000);
+setInterval(tickLockout, 1000);
 setInterval(refreshAges, 1000); // keeps "X тому" ticking
 (function loop() {
   drawEcg();

@@ -792,7 +792,8 @@ static void sender_loop(void)
         if (len == 0) {
             ESP_LOGE(TAG, "telemetry JSON didn't fit in %u bytes, batch dropped", (unsigned)cap);
         } else if (wifi_connect_is_up()) {
-            bool idle = !boot_lockout && !(s_ecg_active || s_vitals_active || s_temp_active);
+            // warm-up counts as idle too: once a minute is enough for the countdown
+            bool idle = !(s_ecg_active || s_vitals_active || s_temp_active);
             esp_err_t err = telemetry_azure_publish(json, len, idle);
             if (err == ESP_OK) {
                 delivered = true;
