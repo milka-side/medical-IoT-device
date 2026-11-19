@@ -23,12 +23,13 @@
 // Call once from app_main after wifi_connect_start().
 esp_err_t telemetry_azure_init(void);
 
-// Publishes the same JSON body used for the HTTP POST to
-// devices/<deviceId>/messages/events/ (QoS 0). It reaches the dashboard via
-// the hub's built-in Event Hub-compatible endpoint (web/src/azure-ingest.js).
+// Publishes a telemetry JSON body to devices/<deviceId>/messages/events/
+// (QoS 0). It reaches the dashboard via the hub's built-in Event
+// Hub-compatible endpoint (web/src/azure-ingest.js).
 //
-// `idle` = no measurement running. Idle status messages are throttled to
-// one per CONFIG_MIOT_AZURE_IDLE_PERIOD_S, because the free F1 tier allows
+// `idle` = nothing in this message the dashboard doesn't already have (no
+// ECG samples, no result, no state change). Such messages go out at most
+// once per CONFIG_MIOT_AZURE_IDLE_PERIOD_S, because the free F1 tier allows
 // only 8000 messages/day and the main loop ticks once a second.
 // Returns ESP_ERR_INVALID_STATE while not connected to the hub (and
 // ESP_ERR_NOT_SUPPORTED when Azure is disabled), so the caller can keep

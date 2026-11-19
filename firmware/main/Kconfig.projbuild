@@ -105,13 +105,15 @@ menu "Medical IoT Device"
             it in menuconfig (sdkconfig is not committed).
 
     config MIOT_AZURE_IDLE_PERIOD_S
-        int "Seconds between idle status messages to Azure"
+        int "Seconds between status messages to Azure when nothing changes"
         depends on MIOT_AZURE_ENABLE
         range 1 3600
         default 60
         help
-            While no measurement is running only one status message per
-            this many seconds goes to Azure (measurement data is always
-            sent). The free F1 tier allows 8000 messages/day.
+            Outside an ECG recording (idle, warm-up, pulse/SpO2 or
+            temperature alone) only one status message per this many
+            seconds goes to Azure, plus one right away whenever a window
+            opens or closes or a result is ready. During ECG every second
+            is sent. The free F1 tier allows 8000 messages/day.
 
 endmenu

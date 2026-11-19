@@ -535,6 +535,8 @@ static void sender_loop(void)
     bool wifi_ps_on = true;
     bool in_session = false;       // a measurement is running (or just ended this tick)
     int idle_ticks = 0;            // consecutive ticks with every window closed
+    int sent_state = -1;           // windows/lockout state in the last message Azure accepted
+    int sent_sd_files = -2;        // sd_files in that message
     int64_t next_copy_try_us = 0;  // SD copy retry throttle (no card, write error)
     TickType_t next_tick = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
 
@@ -721,9 +723,19 @@ static void sender_loop(void)
         if (len == 0) {
             ESP_LOGE(TAG, "telemetry JSON didn't fit in %u bytes, batch dropped", (unsigned)cap);
         } else if (wifi_connect_is_up()) {
-            bool idle = !boot_lockout && !(s_ecg_active || s_vitals_active || s_temp_active);
-            if (telemetry_azure_publish(json, len, idle) == ESP_OK) {
+            // Only ECG needs a message every second (live trace). Otherwise -
+            // warm-up, pulse/SpO2 or temperature alone, idle - one status a
+            // minute (Azure F1 quota), plus right away whenever something
+            // changes: a window opens or closes, a result is ready, the number
+            // of SD files changes. The dashboard counts the timers down itself.
+            int state = (s_ecg_active ? 1 : 0) | (s_vitals_active ? 2 : 0) | (s_temp_active ? 4 : 0) |
+                        (boot_lockout ? 8 : 0);
+            bool changed = state != sent_state || t.sd_files != sent_sd_files || t.temp_ok || t.vitals_ok;
+            bool throttle = !s_ecg_active && !changed;
+            if (telemetry_azure_publish(json, len, throttle) == ESP_OK) {
                 delivered = true;
+                sent_state = state;
+                sent_sd_files = t.sd_files;
             } else if (log_this_line) {
                 ESP_LOGW(TAG, "not connected to Azure IoT Hub - keeping this measurement for the SD card");
             }

@@ -328,15 +328,16 @@ esp_err_t telemetry_azure_publish(const char *json_body, size_t len, bool idle)
     if (!s_connected) {
         return ESP_ERR_INVALID_STATE; // caller keeps measurement data for the SD card
     }
-    if (idle) {
-        int64_t now = esp_timer_get_time();
-        if (now - s_last_idle_us < (int64_t)CONFIG_MIOT_AZURE_IDLE_PERIOD_S * 1000000) {
-            return ESP_OK;
-        }
-        s_last_idle_us = now;
+    int64_t now = esp_timer_get_time();
+    if (idle && now - s_last_idle_us < (int64_t)CONFIG_MIOT_AZURE_IDLE_PERIOD_S * 1000000) {
+        return ESP_OK; // the dashboard already has this state; next status in a while
     }
     int msg_id = esp_mqtt_client_publish(s_client, s_topic, json_body, (int)len, /*qos=*/0, /*retain=*/0);
-    return (msg_id >= 0) ? ESP_OK : ESP_FAIL;
+    if (msg_id < 0) {
+        return ESP_FAIL;
+    }
+    s_last_idle_us = now; // any message restarts the "one a minute" timer
+    return ESP_OK;
 }
 
 #else // !CONFIG_MIOT_AZURE_ENABLE
